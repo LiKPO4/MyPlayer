@@ -6,7 +6,7 @@
 - 手机当前没有 adb 连接，本阶段不处理 adb 安装/卸载。
 - 后续打包优先使用 release 包，避免 debug 包体积过大。
 - 项目已初始化 Git，并推送到公开仓库 `https://github.com/LiKPO4/MyPlayer`。
-- 在线更新已接入 GitHub Releases，当前基线版本为 `1.0.7+8`。
+- 在线更新已接入 GitHub Releases，当前开发版本为 `1.0.8+9`。
 
 ## 已完成
 
@@ -27,6 +27,7 @@
 - 增加在线更新：应用启动时静默检查，设置页可手动检查；发现新版本后使用 Android 系统下载器下载 APK，并打开系统安装界面。
 - 增加 `.github/workflows/release.yml`：推送 `v*` tag 后自动使用 GitHub Secrets 中的同一签名密钥构建并发布 APK。
 - 首个公开 Release `v1.0.7+8` 已发布：`https://github.com/LiKPO4/MyPlayer/releases/tag/v1.0.7%2B8`。
+- 扫描缓存改用永久稳定键 `scan:` 和 `snapshot:`；升级后会自动迁移当前 `scan-v11`、`snapshot-v5` 数据，后续算法调整不得再通过修改整库缓存键淘汰缓存。
 
 ## 未完成
 
@@ -68,5 +69,5 @@ Copy-Item -LiteralPath 'build\app\outputs\flutter-apk\app-release.apk' -Destinat
 
 ## 下一步
 
-- 在不使用 adb 的前提下，等待用户手动安装 `C:\Users\Administrator\Desktop\MyPlayer-release.apk` 后回传实机表现。
+- 发布 `v1.0.8+9`，在不使用 adb 的前提下通过应用在线更新或桌面 APK 安装后回传实机表现。
 - 若继续开发，默认每轮只做一个可验证的最小增量，并优先跑 `flutter analyze`、`flutter test`、`:app:testDebugUnitTest` 或 release 构建；release 构建优先加 `--no-tree-shake-icons`，避免图标字体被裁掉。

@@ -50,7 +50,10 @@ class EncryptedVideoScanner(
 
     fun loadSnapshot(directoryUri: Uri): ScanResult? {
         return runCatching {
-            val raw = cachePrefs.getString(snapshotKey(directoryUri), null) ?: return null
+            val raw = readStoredValue(
+                currentKey = snapshotKey(directoryUri),
+                legacyKey = legacySnapshotKey(directoryUri)
+            ) ?: return null
             JSONObject(raw).toScanResult()
         }.getOrNull()
     }
@@ -223,7 +226,11 @@ class EncryptedVideoScanner(
 
     private fun loadCache(directoryUri: Uri): JSONObject {
         return runCatching {
-            JSONObject(cachePrefs.getString(cacheKey(directoryUri), "{}").orEmpty())
+            val raw = readStoredValue(
+                currentKey = cacheKey(directoryUri),
+                legacyKey = legacyCacheKey(directoryUri)
+            )
+            JSONObject(raw ?: "{}")
         }.getOrElse { JSONObject() }
     }
 
@@ -231,9 +238,22 @@ class EncryptedVideoScanner(
         cachePrefs.edit().putString(cacheKey(directoryUri), cache.toString()).apply()
     }
 
-    private fun cacheKey(directoryUri: Uri): String = "scan-v11:$directoryUri"
+    // These keys stay stable across app versions. Cache format changes must migrate
+    // individual records instead of invalidating the entire scanned library.
+    private fun cacheKey(directoryUri: Uri): String = "scan:$directoryUri"
 
-    private fun snapshotKey(directoryUri: Uri): String = "snapshot-v5:$directoryUri"
+    private fun snapshotKey(directoryUri: Uri): String = "snapshot:$directoryUri"
+
+    private fun legacyCacheKey(directoryUri: Uri): String = "scan-v11:$directoryUri"
+
+    private fun legacySnapshotKey(directoryUri: Uri): String = "snapshot-v5:$directoryUri"
+
+    private fun readStoredValue(currentKey: String, legacyKey: String): String? {
+        cachePrefs.getString(currentKey, null)?.let { return it }
+        val legacyValue = cachePrefs.getString(legacyKey, null) ?: return null
+        cachePrefs.edit().putString(currentKey, legacyValue).apply()
+        return legacyValue
+    }
 
     private fun saveSnapshot(directoryUri: Uri, result: ScanResult) {
         val root = JSONObject()
