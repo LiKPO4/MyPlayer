@@ -21,6 +21,10 @@ class EncryptedVideoDataSource(
     private val lookupVideo: (Uri) -> EncryptedVideo?
 ) : BaseDataSource(false) {
     private val resolver = context.applicationContext.contentResolver
+    private val boundaryPrefs = context.applicationContext.getSharedPreferences(
+        "playback_boundaries",
+        Context.MODE_PRIVATE
+    )
     private var parcelFileDescriptor: ParcelFileDescriptor? = null
     private var inputStream: FileInputStream? = null
     private var currentUri: Uri? = null
@@ -43,7 +47,7 @@ class EncryptedVideoDataSource(
         inputStream = stream
         currentUri = dataSpec.uri
         readPosition = dataSpec.position
-        xorUntilOffset = if (video.xorUntilOffset >= 0L) video.xorUntilOffset else video.size
+        xorUntilOffset = resolveXorUntilOffset(video)
         bytesRemaining = resolveLength(dataSpec, video)
         opened = true
         transferStarted(dataSpec)
@@ -91,6 +95,30 @@ class EncryptedVideoDataSource(
         if (dataSpec.length != C.LENGTH_UNSET.toLong()) return dataSpec.length
         if (video.size <= 0L) return C.LENGTH_UNSET.toLong()
         return max(0L, video.size - dataSpec.position)
+    }
+
+    private fun resolveXorUntilOffset(video: EncryptedVideo): Long {
+        if (video.xorUntilOffset == 0L) return 0L
+
+        val key = EncryptedVideoFormat.boundaryCacheKey(
+            uri = video.uri.toString(),
+            fileSize = video.size,
+            lastModified = video.lastModified
+        )
+        if (boundaryPrefs.contains(key)) {
+            return boundaryPrefs.getLong(key, video.xorUntilOffset).coerceIn(0L, video.size)
+        }
+
+        val fallback = video.xorUntilOffset.takeIf { it >= 0L } ?: video.size
+        val resolved = runCatching {
+            resolver.openInputStream(video.uri)?.use { stream ->
+                EncryptedVideoFormat.findEncryptedPrefixEnd(stream, video.size)
+            }
+        }.getOrNull()?.takeIf { it >= 0L } ?: fallback
+
+        val safeOffset = resolved.coerceIn(0L, video.size)
+        boundaryPrefs.edit().putLong(key, safeOffset).apply()
+        return safeOffset
     }
 
     class Factory(

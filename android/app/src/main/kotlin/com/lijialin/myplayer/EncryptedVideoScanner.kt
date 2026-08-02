@@ -12,6 +12,7 @@ class EncryptedVideoScanner(
 ) {
     private val resolver = context.contentResolver
     private val cachePrefs = context.getSharedPreferences("scan_cache", Context.MODE_PRIVATE)
+    private val boundaryPrefs = context.getSharedPreferences("playback_boundaries", Context.MODE_PRIVATE)
     private lateinit var treeUri: Uri
     private lateinit var cache: JSONObject
     private lateinit var nextCache: JSONObject
@@ -195,7 +196,7 @@ class EncryptedVideoScanner(
         } ?: return null
 
         if (EncryptedVideoFormat.hasPlainMp4Header(header, headerBytes)) {
-            return EncryptedVideo(
+            val video = EncryptedVideo(
                 uri = child.uri,
                 displayName = originalTitle(child),
                 fileName = child.name,
@@ -203,6 +204,8 @@ class EncryptedVideoScanner(
                 lastModified = child.lastModified,
                 xorUntilOffset = 0L
             )
+            rememberBoundary(video)
+            return video
         }
 
         if (!EncryptedVideoFormat.hasEncryptedMp4Header(header, headerBytes)) return null
@@ -210,7 +213,7 @@ class EncryptedVideoScanner(
             EncryptedVideoFormat.findEncryptedPrefixEnd(stream, child.size)
         } ?: -1L
 
-        return EncryptedVideo(
+        val video = EncryptedVideo(
             uri = child.uri,
             displayName = originalTitle(child),
             fileName = child.name,
@@ -218,6 +221,17 @@ class EncryptedVideoScanner(
             lastModified = child.lastModified,
             xorUntilOffset = xorUntilOffset
         )
+        rememberBoundary(video)
+        return video
+    }
+
+    private fun rememberBoundary(video: EncryptedVideo) {
+        val key = EncryptedVideoFormat.boundaryCacheKey(
+            uri = video.uri.toString(),
+            fileSize = video.size,
+            lastModified = video.lastModified
+        )
+        boundaryPrefs.edit().putLong(key, video.xorUntilOffset).apply()
     }
 
     private fun originalTitle(child: ChildInfo): String {

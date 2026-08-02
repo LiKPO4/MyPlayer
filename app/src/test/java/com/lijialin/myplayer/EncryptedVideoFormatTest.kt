@@ -148,6 +148,42 @@ class EncryptedVideoFormatTest {
         )
     }
 
+    @Test
+    fun findsTransitionBeyondFormerEightMegabyteLimit() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        val encryptedPadding = ByteArray(8 * 1024 * 1024 + 64 * 1024) { 0x12 }
+        val encryptedEvidence = repeatedSamples { nalSample(0x41, 10).xor() }
+        val plainEvidence = repeatedSamples { nalSample(0x41, 10) }
+        val payload = encryptedPadding + encryptedEvidence + plainEvidence
+        val encryptedMdatHeader = boxHeader("mdat", 8 + payload.size).xor()
+        val bytes = encryptedFtyp + encryptedMdatHeader + payload
+        val expectedTransition = encryptedFtyp.size + encryptedMdatHeader.size +
+            encryptedPadding.size + encryptedEvidence.size
+
+        assertEquals(
+            expectedTransition.toLong(),
+            EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        )
+    }
+
+    @Test
+    fun findsHevcTransitionInsideEncryptedMdat() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        val encryptedSamples = repeatedSamples { hevcNalSample(nalType = 0, payloadSize = 10).xor() }
+        val plainSamples = repeatedSamples { hevcNalSample(nalType = 0, payloadSize = 10) }
+        val encryptedMdatHeader = boxHeader(
+            "mdat",
+            8 + encryptedSamples.size + plainSamples.size
+        ).xor()
+        val bytes = encryptedFtyp + encryptedMdatHeader + encryptedSamples + plainSamples
+        val expectedTransition = encryptedFtyp.size + encryptedMdatHeader.size + encryptedSamples.size
+
+        assertEquals(
+            expectedTransition.toLong(),
+            EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        )
+    }
+
     private fun box(type: String, size: Int): ByteArray {
         val bytes = ByteArray(size)
         boxHeader(type, size).copyInto(bytes)
@@ -172,6 +208,24 @@ class EncryptedVideoFormatTest {
             bytes[index] = (index and 0x7F).toByte()
         }
         return bytes
+    }
+
+    private fun hevcNalSample(nalType: Int, payloadSize: Int): ByteArray {
+        val nalLength = payloadSize + 2
+        val bytes = ByteArray(4 + nalLength)
+        bytes[3] = nalLength.toByte()
+        bytes[4] = (nalType shl 1).toByte()
+        bytes[5] = 1
+        for (index in 6 until bytes.size) {
+            bytes[index] = (index and 0x7F).toByte()
+        }
+        return bytes
+    }
+
+    private fun repeatedSamples(factory: () -> ByteArray): ByteArray {
+        var result = ByteArray(0)
+        repeat(6) { result += factory() }
+        return result
     }
 
     private fun ByteArray.xor(): ByteArray {

@@ -6,9 +6,11 @@ import kotlin.math.min
 object EncryptedVideoFormat {
     const val XOR_KEY = 0x12
     const val ENCRYPTED_PREFIX_LENGTH = 1024L * 1024L
-    private const val MEDIA_TRANSITION_SCAN_LIMIT = 8L * 1024L * 1024L
+    const val BOUNDARY_ANALYSIS_VERSION = 12
+    private const val MEDIA_SCAN_CHUNK_SIZE = 1024 * 1024
     private const val MEDIA_TRANSITION_WINDOW = 128 * 1024
     private const val MIN_NAL_EVIDENCE = 5
+    private const val MAX_NAL_SIZE = 8L * 1024L * 1024L
     private val FTYP = byteArrayOf('f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte())
     private val MOOV = byteArrayOf('m'.code.toByte(), 'o'.code.toByte(), 'o'.code.toByte(), 'v'.code.toByte())
     private val TOP_LEVEL_BOXES = setOf("ftyp", "free", "mdat", "wide", "skip", "moov", "styp", "moof", "sidx")
@@ -28,6 +30,10 @@ object EncryptedVideoFormat {
             if (header[index + 4] != FTYP[index]) return false
         }
         return true
+    }
+
+    fun boundaryCacheKey(uri: String, fileSize: Long, lastModified: Long): String {
+        return "v$BOUNDARY_ANALYSIS_VERSION:$fileSize:$lastModified:$uri"
     }
 
     fun xorUntilFromMoovIndex(moovIndex: Long): Long {
@@ -289,19 +295,64 @@ object EncryptedVideoFormat {
     }
 
     private fun InputStream.findPlainMediaTransition(payloadStart: Long, payloadSize: Long): Long {
-        val scanSize = min(payloadSize, MEDIA_TRANSITION_SCAN_LIMIT).toInt()
-        if (scanSize <= 0) return -1L
+        if (payloadSize <= 0L) return -1L
 
-        val buffer = readExact(scanSize)
-        val transition = buffer.findPlainNalTransition()
-        skipFully(payloadSize - buffer.size)
-        return if (transition >= 0) payloadStart + transition else -1L
+        var remaining = payloadSize
+        var totalRead = 0L
+        var nextScanOffset = 0L
+        var carry = ByteArray(0)
+
+        while (remaining > 0L) {
+            val requested = min(remaining, MEDIA_SCAN_CHUNK_SIZE.toLong()).toInt()
+            val chunk = readExact(requested)
+            if (chunk.isEmpty()) break
+
+            val window = ByteArray(carry.size + chunk.size)
+            carry.copyInto(window)
+            chunk.copyInto(window, destinationOffset = carry.size)
+            val windowStart = totalRead - carry.size
+            totalRead += chunk.size
+            remaining -= chunk.size
+
+            val scanEnd = if (remaining > 0L) {
+                (totalRead - MEDIA_TRANSITION_WINDOW).coerceAtLeast(nextScanOffset)
+            } else {
+                totalRead
+            }
+            val fromIndex = (nextScanOffset - windowStart).coerceAtLeast(0L).toInt()
+            val toIndex = (scanEnd - windowStart).coerceIn(0L, window.size.toLong()).toInt()
+            val transition = window.findPlainNalTransition(
+                fromIndex = fromIndex,
+                toIndex = toIndex,
+                windowStart = windowStart,
+                payloadSize = payloadSize
+            )
+            if (transition >= 0) return payloadStart + windowStart + transition
+
+            nextScanOffset = scanEnd
+            val carrySize = min(window.size, MEDIA_TRANSITION_WINDOW * 2)
+            carry = window.copyOfRange(window.size - carrySize, window.size)
+        }
+
+        skipFully(remaining)
+        return -1L
     }
 
-    private fun ByteArray.findPlainNalTransition(): Int {
-        var index = 0
-        while (index + 6 < size) {
-            if (isNalStart(index, xor = false) && !isNalStart(index, xor = true) && hasTransitionEvidence(index)) {
+    private fun ByteArray.findPlainNalTransition(
+        fromIndex: Int,
+        toIndex: Int,
+        windowStart: Long,
+        payloadSize: Long
+    ): Int {
+        var index = fromIndex.coerceAtLeast(0)
+        val end = toIndex.coerceAtMost(size)
+        while (index < end && index + 6 < size) {
+            val bytesAvailable = payloadSize - windowStart - index
+            if (
+                isNalStart(index, xor = false, bytesAvailable) &&
+                !isNalStart(index, xor = true, bytesAvailable) &&
+                hasTransitionEvidence(index, windowStart, payloadSize)
+            ) {
                 return index
             }
             index++
@@ -309,7 +360,7 @@ object EncryptedVideoFormat {
         return -1
     }
 
-    private fun ByteArray.hasTransitionEvidence(index: Int): Boolean {
+    private fun ByteArray.hasTransitionEvidence(index: Int, windowStart: Long, payloadSize: Long): Boolean {
         val beforeStart = (index - MEDIA_TRANSITION_WINDOW).coerceAtLeast(0)
         val afterEnd = (index + MEDIA_TRANSITION_WINDOW).coerceAtMost(size)
         var encryptedBefore = 0
@@ -317,26 +368,41 @@ object EncryptedVideoFormat {
 
         var before = beforeStart
         while (before < index && encryptedBefore < MIN_NAL_EVIDENCE) {
-            if (isNalStart(before, xor = true) && !isNalStart(before, xor = false)) encryptedBefore++
+            val bytesAvailable = payloadSize - windowStart - before
+            if (
+                isNalStart(before, xor = true, bytesAvailable) &&
+                !isNalStart(before, xor = false, bytesAvailable)
+            ) encryptedBefore++
             before++
         }
 
         var after = index
         while (after < afterEnd && plainAfter < MIN_NAL_EVIDENCE) {
-            if (isNalStart(after, xor = false) && !isNalStart(after, xor = true)) plainAfter++
+            val bytesAvailable = payloadSize - windowStart - after
+            if (
+                isNalStart(after, xor = false, bytesAvailable) &&
+                !isNalStart(after, xor = true, bytesAvailable)
+            ) plainAfter++
             after++
         }
 
         return encryptedBefore >= MIN_NAL_EVIDENCE && plainAfter >= MIN_NAL_EVIDENCE
     }
 
-    private fun ByteArray.isNalStart(offset: Int, xor: Boolean): Boolean {
+    private fun ByteArray.isNalStart(offset: Int, xor: Boolean, bytesAvailable: Long): Boolean {
         if (offset + 5 >= size) return false
         val nalLength = readUInt32At(offset, xor)
-        if (nalLength <= 0L || nalLength > 256L * 1024L) return false
-        val header = (this[offset + 4].toInt() xor if (xor) XOR_KEY else 0) and 0xFF
-        if ((header and 0x80) != 0) return false
-        val nalType = header and 0x1F
-        return nalType == 1 || nalType == 5 || nalType == 6 || nalType == 7 || nalType == 8
+        if (nalLength <= 0L || nalLength > MAX_NAL_SIZE || nalLength + 4L > bytesAvailable) return false
+
+        val firstHeader = (this[offset + 4].toInt() xor if (xor) XOR_KEY else 0) and 0xFF
+        if ((firstHeader and 0x80) != 0) return false
+
+        val h264Type = firstHeader and 0x1F
+        val isH264 = h264Type in 1..12
+
+        val secondHeader = (this[offset + 5].toInt() xor if (xor) XOR_KEY else 0) and 0xFF
+        val h265Type = (firstHeader shr 1) and 0x3F
+        val isH265 = h265Type in 0..40 && (secondHeader and 0x07) != 0
+        return isH264 || isH265
     }
 }

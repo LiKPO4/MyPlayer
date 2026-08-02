@@ -49,12 +49,22 @@ object EncryptedVideoScanner {
         } ?: -1L
         if (xorUntilOffset < 0L) return null
 
-        return EncryptedVideo(
+        val video = EncryptedVideo(
             uri = file.uri,
             displayName = file.name ?: file.uri.lastPathSegment.orEmpty(),
             size = file.length(),
             lastModified = file.lastModified(),
             xorUntilOffset = xorUntilOffset
         )
+        val key = EncryptedVideoFormat.boundaryCacheKey(
+            uri = video.uri.toString(),
+            fileSize = video.size,
+            lastModified = video.lastModified
+        )
+        context.getSharedPreferences("playback_boundaries", Context.MODE_PRIVATE)
+            .edit()
+            .putLong(key, video.xorUntilOffset)
+            .apply()
+        return video
     }
 }
