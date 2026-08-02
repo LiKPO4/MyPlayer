@@ -1,9 +1,16 @@
 package com.lijialin.myplayer
 
 import android.app.Activity
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import androidx.media3.common.util.UnstableApi
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -18,6 +25,16 @@ class MainActivity : FlutterActivity() {
     private var scanEvents: EventChannel.EventSink? = null
     private var playerEvents: EventChannel.EventSink? = null
     private var pendingFolderPick: MethodChannel.Result? = null
+    private var pendingUpdateDownloadId: Long? = null
+    private val updateDownloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+            val downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (downloadId != pendingUpdateDownloadId) return
+            pendingUpdateDownloadId = null
+            openDownloadedUpdate(downloadId)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -90,6 +107,16 @@ class MainActivity : FlutterActivity() {
                         getPreferences(MODE_PRIVATE).edit().putBoolean(KEY_RANDOM_INCLUDE_SUBFOLDERS, enabled).apply()
                         result.success(null)
                     }
+                    "getAppVersion" -> {
+                        result.success(getAppVersion())
+                    }
+                    "downloadAndInstallUpdate" -> {
+                        downloadAndInstallUpdate(
+                            call.argument<String>("url"),
+                            call.argument<String>("fileName"),
+                            result
+                        )
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -126,9 +153,17 @@ class MainActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(updateDownloadReceiver, filter)
+        }
     }
 
     override fun onDestroy() {
+        unregisterReceiver(updateDownloadReceiver)
         scannerExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -230,6 +265,72 @@ class MainActivity : FlutterActivity() {
         getPreferences(MODE_PRIVATE).edit().putStringSet(KEY_RANDOM_PLAYED_URIS, next).apply()
     }
 
+    @Suppress("DEPRECATION")
+    private fun getAppVersion(): Map<String, Any> {
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            packageInfo.versionCode.toLong()
+        }
+        return mapOf(
+            "name" to packageInfo.versionName.orEmpty(),
+            "code" to versionCode
+        )
+    }
+
+    private fun downloadAndInstallUpdate(
+        url: String?,
+        requestedFileName: String?,
+        result: MethodChannel.Result
+    ) {
+        if (url.isNullOrBlank()) {
+            result.error("invalid_update_url", "Update URL is empty", null)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")
+                )
+            )
+            result.success("permission_required")
+            return
+        }
+
+        val fileName = requestedFileName
+            ?.replace(Regex("[^A-Za-z0-9._+-]"), "_")
+            ?.takeIf { it.endsWith(".apk", ignoreCase = true) }
+            ?: "MyPlayer-update.apk"
+        val request = DownloadManager.Request(Uri.parse(url))
+            .setTitle("MyPlayer 更新")
+            .setDescription(fileName)
+            .setMimeType(APK_MIME_TYPE)
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName)
+        val downloadManager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+        pendingUpdateDownloadId = downloadManager.enqueue(request)
+        result.success("downloading")
+    }
+
+    private fun openDownloadedUpdate(downloadId: Long) {
+        val downloadManager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        val completed = downloadManager.query(query)?.use { cursor ->
+            if (!cursor.moveToFirst()) return@use false
+            val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+            status == DownloadManager.STATUS_SUCCESSFUL
+        } ?: false
+        if (!completed) return
+        val apkUri = downloadManager.getUriForDownloadedFile(downloadId) ?: return
+        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, APK_MIME_TYPE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { startActivity(installIntent) }
+    }
+
     private fun getSettings(): Map<String, Any> {
         val prefs = getPreferences(MODE_PRIVATE)
         return mapOf(
@@ -244,5 +345,6 @@ class MainActivity : FlutterActivity() {
         const val KEY_RANDOM_PLAYED_URIS = "random_played_uris"
         const val KEY_DEFAULT_PLAYBACK_SPEED = "default_playback_speed"
         const val KEY_RANDOM_INCLUDE_SUBFOLDERS = "random_include_subfolders"
+        const val APK_MIME_TYPE = "application/vnd.android.package-archive"
     }
 }

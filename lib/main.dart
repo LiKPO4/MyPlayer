@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -154,6 +156,208 @@ class NativeBridge {
       'enabled': enabled,
     });
   }
+
+  static Future<AppVersion> getAppVersion() async {
+    final result = await _methods.invokeMethod<Object?>('getAppVersion');
+    return AppVersion.fromMap(Map<String, dynamic>.from(result as Map));
+  }
+
+  static Future<String> downloadAndInstallUpdate(
+    String url,
+    String fileName,
+  ) async {
+    return await _methods.invokeMethod<String>('downloadAndInstallUpdate', {
+          'url': url,
+          'fileName': fileName,
+        }) ??
+        'failed';
+  }
+}
+
+class AppVersion {
+  const AppVersion({required this.name, required this.code});
+
+  final String name;
+  final int code;
+
+  factory AppVersion.fromMap(Map<String, dynamic> map) {
+    return AppVersion(
+      name: map['name'] as String? ?? '0.0.0',
+      code: (map['code'] as num? ?? 0).toInt(),
+    );
+  }
+}
+
+class UpdateRelease {
+  const UpdateRelease({
+    required this.tag,
+    required this.notes,
+    required this.downloadUrl,
+    required this.fileName,
+  });
+
+  final String tag;
+  final String notes;
+  final String downloadUrl;
+  final String fileName;
+
+  factory UpdateRelease.fromMap(Map<String, dynamic> map) {
+    final assets = (map['assets'] as List? ?? const []).whereType<Map>();
+    final apk = assets.cast<Map>().firstWhere(
+      (asset) =>
+          (asset['name'] as String? ?? '').toLowerCase().endsWith('.apk'),
+      orElse: () => <String, dynamic>{},
+    );
+    return UpdateRelease(
+      tag: map['tag_name'] as String? ?? '',
+      notes: map['body'] as String? ?? '',
+      downloadUrl: apk['browser_download_url'] as String? ?? '',
+      fileName: apk['name'] as String? ?? 'MyPlayer-update.apk',
+    );
+  }
+}
+
+class UpdateService {
+  static const _latestReleaseUrl =
+      'https://api.github.com/repos/LiKPO4/MyPlayer/releases/latest';
+
+  static Future<void> check(
+    BuildContext context, {
+    required bool silent,
+  }) async {
+    try {
+      final current = await NativeBridge.getAppVersion();
+      final release = await _fetchLatest(current);
+      if (!context.mounted) return;
+      if (!isNewer(release.tag, current)) {
+        if (!silent) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('当前已是最新版本 ${current.name}')));
+        }
+        return;
+      }
+      if (release.downloadUrl.isEmpty) {
+        if (!silent) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('最新版本没有可下载的 APK')));
+        }
+        return;
+      }
+      await _showUpdateDialog(context, current, release);
+    } catch (_) {
+      if (!silent && context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('检查更新失败，请稍后重试')));
+      }
+    }
+  }
+
+  static Future<UpdateRelease> _fetchLatest(AppVersion current) async {
+    final client =
+        HttpClient()..connectionTimeout = const Duration(seconds: 12);
+    try {
+      final request = await client.getUrl(Uri.parse(_latestReleaseUrl));
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'MyPlayer/${current.name}',
+      );
+      request.headers.set(
+        HttpHeaders.acceptHeader,
+        'application/vnd.github+json',
+      );
+      final response = await request.close();
+      if (response.statusCode != HttpStatus.ok) {
+        throw HttpException('GitHub returned ${response.statusCode}');
+      }
+      final body = await utf8.decoder.bind(response).join();
+      return UpdateRelease.fromMap(
+        Map<String, dynamic>.from(jsonDecode(body) as Map),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static bool isNewer(String tag, AppVersion current) {
+    final release = _parseVersion(tag);
+    final installed = _parseVersion(current.name);
+    if (release == null || installed == null) return false;
+    for (var index = 0; index < 3; index++) {
+      if (release[index] != installed[index]) {
+        return release[index] > installed[index];
+      }
+    }
+    final releaseCode = release[3];
+    return releaseCode > 0 && releaseCode > current.code;
+  }
+
+  static List<int>? _parseVersion(String value) {
+    final match = RegExp(
+      r'^v?(\d+)\.(\d+)\.(\d+)(?:\+(\d+))?$',
+    ).firstMatch(value.trim());
+    if (match == null) return null;
+    return List<int>.generate(
+      4,
+      (index) => int.parse(match.group(index + 1) ?? '0'),
+    );
+  }
+
+  static Future<void> _showUpdateDialog(
+    BuildContext context,
+    AppVersion current,
+    UpdateRelease release,
+  ) async {
+    final shouldDownload = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text('发现新版本 ${release.tag}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('当前版本 ${current.name}+${current.code}'),
+                if (release.notes.trim().isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(release.notes.trim()),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('稍后'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              icon: const Icon(Icons.download_rounded),
+              label: const Text('下载更新'),
+            ),
+          ],
+        );
+      },
+    );
+    if (shouldDownload != true || !context.mounted) return;
+    final status = await NativeBridge.downloadAndInstallUpdate(
+      release.downloadUrl,
+      release.fileName,
+    );
+    if (!context.mounted) return;
+    final message =
+        status == 'permission_required'
+            ? '请允许安装未知应用，然后再次检查更新'
+            : status == 'downloading'
+            ? '更新包开始下载，完成后将打开安装界面'
+            : '无法开始下载更新';
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
 }
 
 class AppSettings {
@@ -169,8 +373,7 @@ class AppSettings {
     return AppSettings(
       defaultPlaybackSpeed:
           (map['defaultPlaybackSpeed'] as num? ?? 1.0).toDouble(),
-      randomIncludeSubfolders:
-          map['randomIncludeSubfolders'] as bool? ?? false,
+      randomIncludeSubfolders: map['randomIncludeSubfolders'] as bool? ?? false,
     );
   }
 
@@ -478,6 +681,9 @@ class _BrowserPageState extends State<BrowserPage> {
       });
     });
     _restore();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      UpdateService.check(context, silent: true);
+    });
   }
 
   @override
@@ -877,6 +1083,7 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   late AppSettings _settings = widget.initialSettings;
   bool _clearingRandomHistory = false;
+  bool _checkingForUpdate = false;
 
   static const _speeds = [0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 
@@ -932,6 +1139,20 @@ class _SettingsPageState extends State<SettingsPage> {
                     : const Icon(Icons.chevron_right_rounded),
             onTap: _clearingRandomHistory ? null : _clearRandomHistory,
           ),
+          ListTile(
+            leading: const Icon(Icons.system_update_rounded),
+            title: const Text('检查更新'),
+            subtitle: const Text('从 GitHub Releases 获取最新版本'),
+            trailing:
+                _checkingForUpdate
+                    ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                    : const Icon(Icons.chevron_right_rounded),
+            onTap: _checkingForUpdate ? null : _checkForUpdate,
+          ),
         ],
       ),
     );
@@ -961,6 +1182,13 @@ class _SettingsPageState extends State<SettingsPage> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text('已清除随机播放记录')));
+  }
+
+  Future<void> _checkForUpdate() async {
+    setState(() => _checkingForUpdate = true);
+    await UpdateService.check(context, silent: false);
+    if (!mounted) return;
+    setState(() => _checkingForUpdate = false);
   }
 
   String _formatSpeed(double speed) {

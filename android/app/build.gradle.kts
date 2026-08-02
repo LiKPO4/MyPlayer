@@ -4,6 +4,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseKeystorePath = System.getenv("MYPLAYER_KEYSTORE_PATH")
+
 android {
     namespace = "com.lijialin.myplayer"
     compileSdk = 36
@@ -26,9 +28,24 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (!releaseKeystorePath.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(releaseKeystorePath)
+                storePassword = System.getenv("MYPLAYER_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("MYPLAYER_KEY_ALIAS")
+                keyPassword = System.getenv("MYPLAYER_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeystorePath.isNullOrBlank()) {
+                signingConfigs.getByName("debug")
+            } else {
+                signingConfigs.getByName("release")
+            }
         }
     }
 }
