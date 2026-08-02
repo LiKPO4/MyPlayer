@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MyPlayer</string>
+    <string name="choose_folder">选择文件夹</string>
+    <string name="refresh">刷新</string>
+    <string name="sort_by_time">按时间</string>
+    <string name="sort_by_name">按名称</string>
+    <string name="random_play">随机</string>
+    <string name="empty_state">请选择包含加密视频的文件夹</string>
+</resources>

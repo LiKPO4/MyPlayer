@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background"
+    android:orientation="vertical">
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="12dp">
+
+            <Button
+                android:id="@+id/chooseFolderButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:text="@string/choose_folder" />
+
+            <Button
+                android:id="@+id/refreshButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:text="@string/refresh" />
+
+            <Button
+                android:id="@+id/sortButton"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="8dp"
+                android:text="@string/sort_by_time" />
+
+            <Switch
+                android:id="@+id/randomSwitch"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="12dp"
+                android:text="@string/random_play"
+                android:textColor="@color/text_primary" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/playerView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="5"
+        android:background="#000000"
+        app:resize_mode="fit"
+        app:show_buffering="when_playing"
+        app:use_controller="true" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/surface"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="10dp"
+        android:text="@string/empty_state"
+        android:textColor="@color/text_secondary"
+        android:textSize="14sp" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/videoList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="6"
+        android:clipToPadding="false"
+        android:paddingBottom="8dp" />
+</LinearLayout>

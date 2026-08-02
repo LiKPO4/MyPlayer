@@ -1,0 +1,31 @@
+# Flutter and Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+
+# Android and Gradle
+.gradle/
+.kotlin/
+android/.gradle/
+android/.kotlin/
+app/build/
+android/app/build/
+local.properties
+android/local.properties
+key.properties
+**/*.jks
+**/*.keystore
+
+# IDE and operating system
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local media and captures
+测试视频/
+captures/
+android/captures/

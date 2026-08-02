@@ -1,0 +1,34 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.lijialin.myplayer"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.lijialin.myplayer"
+        minSdk 23
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    def media3_version = "1.10.1"
+
+    implementation "androidx.activity:activity-ktx:1.11.0"
+    implementation "androidx.documentfile:documentfile:1.1.0"
+    implementation "androidx.media3:media3-exoplayer:$media3_version"
+    implementation "androidx.media3:media3-ui:$media3_version"
+    implementation "androidx.recyclerview:recyclerview:1.4.0"
+
+    testImplementation "junit:junit:4.13.2"
+}
