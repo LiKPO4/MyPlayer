@@ -5,8 +5,8 @@
 - 继续 Flutter 版本播放器开发。
 - 手机当前没有 adb 连接，本阶段不处理 adb 安装/卸载。
 - 后续打包优先使用 release 包，避免 debug 包体积过大。
-- 项目已初始化 Git，并推送到私有仓库 `https://github.com/LiKPO4/MyPlayer`。
-- 正在设计在线更新；私有 GitHub Release 无法匿名检查和下载，不能把 GitHub Token 内置进 APK。
+- 项目已初始化 Git，并推送到公开仓库 `https://github.com/LiKPO4/MyPlayer`。
+- 在线更新已接入 GitHub Releases，当前基线版本为 `1.0.7+8`。
 
 ## 已完成
 
@@ -24,6 +24,9 @@
 - 修复样例 `d6096573-668c-408e-9d8c-5c101e6605de` 在约 3 到 5 秒画面撕裂卡顿：该分片 MP4 的第二个 `mdat` 在偏移 `957582` 已从 XOR 切回明文，顶层明文 `moof` 到 `1580375` 才出现。上一版把中间约 623KB 明文再次 XOR，导致跨分片时画面损坏；现在分片 MP4 也会检查每个加密 `mdat` 内部的 H.264 明文切换点。
 - 增强连续播放健壮性：`PlayerBridge` 增加 `onPlayerError`，遇到当前条目播放错误时尝试跳到下一条并重新 `prepare()`；手动上一条/下一条/恢复播放时，如果播放器处于 `STATE_IDLE`，也会重新 `prepare()`。
 - 扫描缓存升级到 `scan-v11`、快照升级到 `snapshot-v5`，避免复用上一版错误的 `1580375` 分片边界。
+- 增加在线更新：应用启动时静默检查，设置页可手动检查；发现新版本后使用 Android 系统下载器下载 APK，并打开系统安装界面。
+- 增加 `.github/workflows/release.yml`：推送 `v*` tag 后自动使用 GitHub Secrets 中的同一签名密钥构建并发布 APK。
+- 首个公开 Release `v1.0.7+8` 已发布：`https://github.com/LiKPO4/MyPlayer/releases/tag/v1.0.7%2B8`。
 
 ## 未完成
 
@@ -34,7 +37,6 @@
 
 - 手机未被 adb 识别；用户已说明手机没有 adb 连接，所以当前不处理 adb 相关内容。
 - 若后续恢复 adb，旧包和新包签名不一致时需要先卸载 `com.lijialin.myplayer`，卸载会清除应用数据、目录授权和随机记录。
-- 在线更新需要用户确认分发方案：推荐源码仓库保持私有，另建公开的更新仓库，只公开版本清单和 release APK；若 APK 也必须私有，则需要额外的带鉴权下载服务。
 
 ## 关键文件
 
