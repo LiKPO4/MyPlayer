@@ -172,6 +172,14 @@ class NativeBridge {
         }) ??
         'failed';
   }
+
+  static Future<String> revealInFileManager(BrowserEntry entry) async {
+    final result = await _methods.invokeMethod<String>('revealInFileManager', {
+      'uri': entry.uri,
+      'parentUri': entry.parentUri,
+    });
+    return (result == null || result.isEmpty) ? 'failed' : result;
+  }
 }
 
 class AppVersion {
@@ -817,6 +825,48 @@ class _BrowserPageState extends State<BrowserPage> {
     );
   }
 
+  Future<void> _showVideoActions(BrowserEntry entry) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.white,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(
+                Icons.play_circle_fill_rounded,
+                color: Color(0xFF1BB98B),
+              ),
+              title: const Text('播放'),
+              onTap: () => Navigator.of(sheetContext).pop('play'),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.folder_open_rounded,
+                color: Color(0xFF1FC196),
+              ),
+              title: const Text('在文件管理器中显示'),
+              onTap: () => Navigator.of(sheetContext).pop('reveal'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'play') {
+      await _playVideo(entry.video!);
+    } else if (action == 'reveal') {
+      final result = await NativeBridge.revealInFileManager(entry);
+      if (!mounted) return;
+      if (result == 'failed') {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('没有找到可处理的应用')));
+      }
+    }
+  }
+
   Future<void> _randomPlay() async {
     final videos = _randomVideos;
     if (videos.isEmpty) {
@@ -898,6 +948,9 @@ class _BrowserPageState extends State<BrowserPage> {
                               _enterFolder(entry);
                             }
                           },
+                          onLongPress: entry.isVideo
+                              ? () => _showVideoActions(entry)
+                              : null,
                         );
                       },
                     ),
@@ -1197,16 +1250,23 @@ class _SettingsPageState extends State<SettingsPage> {
 }
 
 class BrowserEntryTile extends StatelessWidget {
-  const BrowserEntryTile({super.key, required this.entry, required this.onTap});
+  const BrowserEntryTile({
+    super.key,
+    required this.entry,
+    required this.onTap,
+    this.onLongPress,
+  });
 
   final BrowserEntry entry;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
     final isFolder = entry.isFolder;
     return InkWell(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 7, 16, 7),
         child: Row(

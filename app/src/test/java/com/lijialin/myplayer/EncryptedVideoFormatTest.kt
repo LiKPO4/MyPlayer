@@ -89,20 +89,8 @@ class EncryptedVideoFormatTest {
     @Test
     fun findsPlainMediaTransitionInsideEncryptedMdat() {
         val encryptedFtyp = box("ftyp", 24).xor()
-        val encryptedSamples = ByteArray(0) +
-            nalSample(0x65, 12).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor()
-        val plainSamples = ByteArray(0) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10)
+        val encryptedSamples = nalSample(0x65, 12).xor() + repeatedSamples(24) { nalSample(0x41, 10).xor() }
+        val plainSamples = repeatedSamples(64) { nalSample(0x41, 10) }
         val encryptedMdatHeader = boxHeader("mdat", 8 + encryptedSamples.size + plainSamples.size).xor()
         val plainMoov = box("moov", 16)
         val bytes = encryptedFtyp + encryptedMdatHeader + encryptedSamples + plainSamples + plainMoov
@@ -115,23 +103,45 @@ class EncryptedVideoFormatTest {
     }
 
     @Test
+    fun ignoresFakePlainNalPatternsInsideEncryptedMedia() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        // 密文区中混入的假明文 NAL（真实样本里随机字节也会产生这类命中），不得被当成切换点。
+        val fakePlainNal = byteArrayOf(0, 0, 1, 0, 0x41) + ByteArray(251) { 0x5A }
+        val encryptedSamples = (
+            repeatedSamples(24) { nalSample(0x41, 10).xor() } +
+                repeatedSamples(3) { fakePlainNal } +
+                repeatedSamples(24) { nalSample(0x41, 10).xor() }
+            ).padToBlock()
+        val plainSamples = repeatedSamples(64) { nalSample(0x41, 10) }
+        val encryptedMdatHeader = boxHeader("mdat", 8 + encryptedSamples.size + plainSamples.size).xor()
+        val bytes = encryptedFtyp + encryptedMdatHeader + encryptedSamples + plainSamples
+        val expectedTransition = encryptedFtyp.size + encryptedMdatHeader.size + encryptedSamples.size
+
+        assertEquals(
+            expectedTransition.toLong(),
+            EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        )
+    }
+
+    @Test
+    fun fullyEncryptedMdatHasNoMediaTransition() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        val encryptedSamples = repeatedSamples(24) { nalSample(0x41, 10).xor() }
+        val encryptedMdatHeader = boxHeader("mdat", 8 + encryptedSamples.size).xor()
+        val bytes = encryptedFtyp + encryptedMdatHeader + encryptedSamples
+
+        assertEquals(
+            bytes.size.toLong(),
+            EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        )
+    }
+
+    @Test
     fun fragmentedMp4CanTransitionToPlainMediaInsideMdat() {
         val encryptedFtyp = box("ftyp", 24).xor()
         val encryptedMoof = box("moof", 24).xor()
-        val encryptedSamples = ByteArray(0) +
-            nalSample(0x65, 12).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor() +
-            nalSample(0x41, 10).xor()
-        val plainLookingSamples = ByteArray(0) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10) +
-            nalSample(0x41, 10)
+        val encryptedSamples = nalSample(0x65, 12).xor() + repeatedSamples(24) { nalSample(0x41, 10).xor() }
+        val plainLookingSamples = repeatedSamples(64) { nalSample(0x41, 10) }
         val encryptedMdatHeader = boxHeader(
             "mdat",
             8 + encryptedSamples.size + plainLookingSamples.size
@@ -152,8 +162,8 @@ class EncryptedVideoFormatTest {
     fun findsTransitionBeyondFormerEightMegabyteLimit() {
         val encryptedFtyp = box("ftyp", 24).xor()
         val encryptedPadding = ByteArray(8 * 1024 * 1024 + 64 * 1024) { 0x12 }
-        val encryptedEvidence = repeatedSamples { nalSample(0x41, 10).xor() }
-        val plainEvidence = repeatedSamples { nalSample(0x41, 10) }
+        val encryptedEvidence = repeatedSamples(24) { nalSample(0x41, 10).xor() }
+        val plainEvidence = repeatedSamples(64) { nalSample(0x41, 10) }
         val payload = encryptedPadding + encryptedEvidence + plainEvidence
         val encryptedMdatHeader = boxHeader("mdat", 8 + payload.size).xor()
         val bytes = encryptedFtyp + encryptedMdatHeader + payload
@@ -169,8 +179,8 @@ class EncryptedVideoFormatTest {
     @Test
     fun findsHevcTransitionInsideEncryptedMdat() {
         val encryptedFtyp = box("ftyp", 24).xor()
-        val encryptedSamples = repeatedSamples { hevcNalSample(nalType = 0, payloadSize = 10).xor() }
-        val plainSamples = repeatedSamples { hevcNalSample(nalType = 0, payloadSize = 10) }
+        val encryptedSamples = repeatedSamples(24) { hevcNalSample(nalType = 0, payloadSize = 10).xor() }
+        val plainSamples = repeatedSamples(64) { hevcNalSample(nalType = 0, payloadSize = 10) }
         val encryptedMdatHeader = boxHeader(
             "mdat",
             8 + encryptedSamples.size + plainSamples.size
@@ -180,6 +190,71 @@ class EncryptedVideoFormatTest {
 
         assertEquals(
             expectedTransition.toLong(),
+            EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        )
+    }
+
+    @Test
+    fun findsTransitionInsideExtendedLengthMdat() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        val encryptedSamples = repeatedSamples(24) { nalSample(0x41, 10).xor() }
+        val plainSamples = repeatedSamples(64) { nalSample(0x41, 10) }
+        val payload = encryptedSamples + plainSamples
+        // 64 位扩展长度头：size 字段固定为 1，真实长度放在随后 8 字节。
+        val mdatSize = 16L + payload.size
+        val extendedHeader = ByteArray(16)
+        extendedHeader[3] = 1
+        "mdat".toByteArray(Charsets.US_ASCII).copyInto(extendedHeader, destinationOffset = 4)
+        for (index in 0..7) {
+            extendedHeader[8 + index] = (mdatSize shr (56 - 8 * index)).toByte()
+        }
+        val bytes = encryptedFtyp + extendedHeader.xor() + payload
+        val expectedTransition = encryptedFtyp.size + 16 + encryptedSamples.size
+
+        assertEquals(
+            expectedTransition.toLong(),
+            EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        )
+    }
+
+    @Test
+    fun prefersOneMegabyteBoundaryWhenEvidenceSupportsIt() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        val encryptedMdatHeaderPlaceholderSize = 8
+        val payloadStart = encryptedFtyp.size + encryptedMdatHeaderPlaceholderSize
+        val oneMbPos = EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH - payloadStart
+        val encryptedEvidence = repeatedSamples(24) { nalSample(0x41, 10).xor() }
+        val plainEvidence = repeatedSamples(96) { nalSample(0x41, 10) }
+        // 0x12 填充对明文/密文 NAL 判定均为中性，模拟 1MB 之前的无命中区。
+        val paddingBeforeOneMb = ByteArray((oneMbPos - encryptedEvidence.size).toInt()) { 0x12 }
+        val tailPadding = ByteArray(384 * 1024) { 0x12 }
+        val payload = encryptedEvidence + paddingBeforeOneMb + plainEvidence + tailPadding
+        val encryptedMdatHeader = boxHeader("mdat", 8 + payload.size).xor()
+        val bytes = encryptedFtyp + encryptedMdatHeader + payload
+
+        assertEquals(
+            EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH,
+            EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        )
+    }
+
+    @Test
+    fun rejectsOneMegabyteBoundaryWhenTransitionIsLater() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        val payloadStart = encryptedFtyp.size + 8
+        val oneMbPos = EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH - payloadStart
+        val encryptedEvidence = repeatedSamples(24) { nalSample(0x41, 10).xor() }
+        val plainEvidence = repeatedSamples(96) { nalSample(0x41, 10) }
+        // 加密区中性填充延到 1MB 之后 300KB，1MB 快路径必须因证据不足被否决。
+        val plainStartInPayload = oneMbPos + 300L * 1024L
+        val padding = ByteArray((plainStartInPayload - encryptedEvidence.size).toInt()) { 0x12 }
+        val payload = encryptedEvidence + padding + plainEvidence
+        val encryptedMdatHeader = boxHeader("mdat", 8 + payload.size).xor()
+        val bytes = encryptedFtyp + encryptedMdatHeader + payload
+        val expectedTransition = payloadStart + plainStartInPayload
+
+        assertEquals(
+            expectedTransition,
             EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
         )
     }
@@ -222,10 +297,16 @@ class EncryptedVideoFormatTest {
         return bytes
     }
 
-    private fun repeatedSamples(factory: () -> ByteArray): ByteArray {
+    private fun repeatedSamples(count: Int, factory: () -> ByteArray): ByteArray {
         var result = ByteArray(0)
-        repeat(6) { result += factory() }
+        repeat(count) { result += factory() }
         return result
+    }
+
+    private fun ByteArray.padToBlock(): ByteArray {
+        val remainder = size % 1024
+        if (remainder == 0) return this
+        return this + ByteArray(1024 - remainder) { 0x12 }
     }
 
     private fun ByteArray.xor(): ByteArray {

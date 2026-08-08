@@ -33,6 +33,13 @@
 - 边界分析改为低内存的全 `mdat` 流式扫描，支持 H.264/H.265，并按整个媒体负载校验 NAL 长度；新增超过 8MB 与 HEVC 切换点的回归测试。
 - 不修改永久扫描缓存键。新增独立 `v12` 播放边界缓存：旧视频只在第一次播放时重新验证边界并持久化，避免整库重新扫描。
 - 深度边界修复版本 `v1.0.9+10` 已发布：`https://github.com/LiKPO4/MyPlayer/releases/tag/v1.0.9%2B10`。
+- 修复 v12 边界算法把密文区随机假明文 NAL 误判为切换点：样例 `6ebbce0a` 被误判到文件偏移 `2759`（真值 `1050018`），导致前 5-10 秒无法播放。`findPlainMediaTransition(...)` 改为 1KB 块明文/密文 NAL 密度统计 + 后缀差分和 argmax 定位切换块，再取块内首个明文 NAL；纯加密区后缀和为 0 不误判。播放边界缓存升级到 `v13`，受影响视频首次播放时自动重新验证。
+- 新算法在三个真实样本上验证：`6ebbce0a` → `1050018`（与旧版已知正确值一致）、`5a0e1f87` → `1049778`、`b89e5eeb` → `1016686`；v12 对应错误值为 `2759`/`9124`/`1947`。
+- 单元测试新增密文区假明文 NAL 干扰、全加密 mdat 无切换两个回归场景。
+- 增加长按视频弹出菜单：「播放」和「在文件管理器中显示」。原生 `MainActivity.kt` 新增 `revealInFileManager`：优先用 `vnd.android.document/directory` 在系统文件管理器打开所在目录（根目录视频的 parentUri 为空时从 `directory_uri` tree URI 推导根 document URI），失败退化为 `video/*` 打开视频本身，再失败返回 `failed` 由 Dart 侧提示。
+- 修复 `788ae0e2` 完全无法播放：根因是顶层 box 遍历守卫 `decodedSize < 8L` 把 64 位扩展长度标记（size==1）当非法长度直接返回 fileSize，扩展长度解析分支成为死代码，整个 32MB 被当密文 XOR。守卫改为 `decodedSize != 1L && decodedSize < 8L`，`findEncryptedPrefixEnd` 与 `findEncryptedMoovBoxStart` 同步修复。
+- 边界算法升级到 v14：加密工具固定 XOR 文件前 1MB（ffmpeg 实证：四个真实文件 `5a0e1f87`/`b89e5eeb`/`6ebbce0a`/`788ae0e2` 按 K=1048576 解密均 0 错误）。`findPlainMediaTransition(...)` 改为单次流式累积差分扫描：先用差分证据验证 1MB 点（处于最低谷且其后转明文），命中直接返回 1MB——只需扫约 1.25MB，解决 v13 全 mdat 扫描导致的首播卡顿；证据不足退回 argmin 全扫（最低点后首个明文 NAL，差分回升 512 早退）。
+- 单元测试新增三个场景：1MB 快路径命中、1MB 快路径被否决（真实切换点在其后 300KB）、64 位扩展长度 mdat 边界识别。
 
 ## 未完成
 
@@ -59,8 +66,10 @@
 
 - `flutter analyze`：通过。
 - `flutter test`：通过。
-- `.\gradlew.bat :app:testDebugUnitTest`：通过。
-- `flutter build apk --release --no-pub --no-tree-shake-icons`：通过，桌面 APK 已覆盖到 `C:\Users\Administrator\Desktop\MyPlayer-release.apk`。
+- `.\gradlew.bat :app:testDebugUnitTest`：通过（含 v14 边界算法 10 个回归测试）。
+- v14 边界离线复核：`build/boundary_analysis/v14_replica.py` 复刻线上逻辑，四个真实文件均判定 K=1048576；`ffmpeg_check.py` 按 K=1048576 解密后 ffmpeg 解码均 0 错误（含此前完全无法播放的 `788ae0e2`）。
+- `flutter build apk --release --no-pub --no-tree-shake-icons`：通过，桌面 APK 已覆盖到 `C:\Users\Administrator\Desktop\MyPlayer-release.apk`（含扩展长度 mdat 修复 + v14 边界算法 + 长按"在文件管理器中显示"，版本号仍为 `1.0.9+10`，发布前需先升版本号）。
+- 未验证：真机 `788ae0e2` 是否恢复播放、首播前几秒卡顿是否消失、"在文件管理器中显示"行为。
 
 ## 关键命令
 
@@ -74,5 +83,6 @@ Copy-Item -LiteralPath 'build\app\outputs\flutter-apk\app-release.apk' -Destinat
 
 ## 下一步
 
-- 在不使用 adb 的前提下，通过应用在线更新或桌面 APK 安装 `v1.0.9+10` 后，重点验证 3 到 10 秒画面和首次播放等待时间。
-- 若继续开发，默认每轮只做一个可验证的最小增量，并优先跑 `flutter analyze`、`flutter test`、`:app:testDebugUnitTest` 或 release 构建；release 构建优先加 `--no-tree-shake-icons`，避免图标字体被裁掉。
+- 安装桌面包 `MyPlayer-release.apk` 真机验证：`788ae0e2` 是否恢复播放、首播前几秒卡顿是否消失（v14 快路径只扫约 1.25MB）、长按菜单"在文件管理器中显示"。
+- 真机通过后升 `pubspec.yaml` 版本号并发 `v1.0.10+11`（推送 tag 走 GitHub Actions 发布）。
+- 本轮改动（v14 边界算法 + 扩展长度 box 守卫修复）尚未提交 git，待用户确认后提交。

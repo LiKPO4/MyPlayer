@@ -6,10 +6,24 @@ import kotlin.math.min
 object EncryptedVideoFormat {
     const val XOR_KEY: Int = 0x12
     const val ENCRYPTED_PREFIX_LENGTH: Long = 1024L * 1024L
-    const val BOUNDARY_ANALYSIS_VERSION = 12
-    private const val MEDIA_SCAN_CHUNK_SIZE = 1024 * 1024
-    private const val MEDIA_TRANSITION_WINDOW = 128 * 1024
-    private const val MIN_NAL_EVIDENCE = 5
+    // 边界判定算法版本：每次调整算法必须 +1，让旧缓存（键带 v 前缀）自动失效重算。
+    // v14: 1MB 经验规则快路径——加密工具固定 XOR 文件前 1MB（ffmpeg 实证：四个真实文件
+    //      在 K=1MB 解密均 0 错误）；差分证据吻合时只扫约 1.25MB 即返回，证据不足再退回
+    //      累积差分 argmin 全扫。修复 64 位扩展长度 mdat + 高噪数据导致的误判与全量扫描卡顿。
+    const val BOUNDARY_ANALYSIS_VERSION = 14
+
+    // mdat 差分扫描的读取块大小。
+    private const val MEDIA_SCAN_CHUNK_SIZE = 256 * 1024
+
+    // 1MB 快路径验证：从 1MB 点再往后扫的跨度；1MB 处差分距最低谷的容差。
+    private const val ONE_MB_VALIDATION_SPAN = 256L * 1024L
+    private const val ONE_MB_VALIDATION_MARGIN = 32L
+
+    // 判定「切换为明文」所需的差分净增量（谷底深度 / 1MB 之后明文证据 / argmin 路径后缀）。
+    private const val MIN_PLAIN_EVIDENCE = 24L
+
+    // argmin 全扫的早退：差分自最低点回升超过该值即可提前结束（边界一定在最低点之后）。
+    private const val EARLY_EXIT_RISE = 512L
     private const val MAX_NAL_SIZE = 8L * 1024L * 1024L
     private val FTYP = byteArrayOf('f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte())
     private val MOOV = byteArrayOf('m'.code.toByte(), 'o'.code.toByte(), 'o'.code.toByte(), 'v'.code.toByte())
@@ -48,7 +62,8 @@ object EncryptedVideoFormat {
 
             val decodedSize = header.readUInt32Xor(offset = 0)
             val decodedType = header.copyOfRange(4, 8).xorBytes().toAsciiString()
-            if (decodedType !in TOP_LEVEL_BOXES || decodedSize < 8L) {
+            // size==1 是 64 位扩展长度标记，不能当作非法长度拦截（否则扩展长度 mdat 直接全文件 XOR）。
+            if (decodedType !in TOP_LEVEL_BOXES || (decodedSize != 1L && decodedSize < 8L)) {
                 return fileSize
             }
 
@@ -183,99 +198,80 @@ object EncryptedVideoFormat {
         }
     }
 
+    // 经验规则：加密工具固定 XOR 文件前 1MB。先用累积「明文-密文 NAL 命中差分」
+    // 验证 1MB 处是否处于差分最低谷且其后转明文，命中则直接返回 1MB（只需扫约 1.25MB）。
+    // 验证失败退化为全 payload 差分扫描：最低点之后的首个明文 NAL 作为边界。
     private fun InputStream.findPlainMediaTransition(payloadStart: Long, payloadSize: Long): Long {
         if (payloadSize <= 0L) return -1L
 
-        var remaining = payloadSize
-        var totalRead = 0L
-        var nextScanOffset = 0L
-        var carry = ByteArray(0)
+        val oneMbPos = ENCRYPTED_PREFIX_LENGTH - payloadStart
+        val hasOneMbCandidate = oneMbPos >= 0L && oneMbPos < payloadSize
 
-        while (remaining > 0L) {
-            val requested = min(remaining, MEDIA_SCAN_CHUNK_SIZE.toLong()).toInt()
-            val chunk = readExact(requested)
+        var delta = 0L
+        var minDelta = 0L
+        var minPos = -1L
+        var firstPlainHit = -1L
+        var boundaryAfterMin = -1L
+        var deltaAtOneMb: Long? = null
+        var oneMbEvaluated = !hasOneMbCandidate
+        var offset = 0L
+
+        fun oneMbValidated(): Boolean {
+            val d1 = deltaAtOneMb ?: return false
+            return minDelta <= -MIN_PLAIN_EVIDENCE &&
+                d1 - minDelta <= ONE_MB_VALIDATION_MARGIN &&
+                delta - d1 >= MIN_PLAIN_EVIDENCE
+        }
+
+        while (offset < payloadSize) {
+            val wanted = min(MEDIA_SCAN_CHUNK_SIZE.toLong(), payloadSize - offset).toInt()
+            val chunk = readExact(wanted)
             if (chunk.isEmpty()) break
-
-            val window = ByteArray(carry.size + chunk.size)
-            carry.copyInto(window)
-            chunk.copyInto(window, destinationOffset = carry.size)
-            val windowStart = totalRead - carry.size
-            totalRead += chunk.size
-            remaining -= chunk.size
-
-            val scanEnd = if (remaining > 0L) {
-                (totalRead - MEDIA_TRANSITION_WINDOW).coerceAtLeast(nextScanOffset)
-            } else {
-                totalRead
+            var index = 0
+            while (index + 5 < chunk.size) {
+                val bytesAvailable = payloadSize - offset - index
+                val plain = chunk.isNalStart(index, xor = false, bytesAvailable)
+                val xor = chunk.isNalStart(index, xor = true, bytesAvailable)
+                if (plain && !xor) {
+                    delta++
+                    if (firstPlainHit < 0) firstPlainHit = offset + index
+                    if (minPos >= 0 && boundaryAfterMin < 0) boundaryAfterMin = offset + index
+                } else if (xor && !plain) {
+                    delta--
+                    if (delta < minDelta) {
+                        minDelta = delta
+                        minPos = offset + index
+                        boundaryAfterMin = -1
+                    }
+                }
+                if (!oneMbEvaluated && deltaAtOneMb == null && offset + index >= oneMbPos) {
+                    deltaAtOneMb = delta
+                }
+                index++
             }
-            val fromIndex = (nextScanOffset - windowStart).coerceAtLeast(0L).toInt()
-            val toIndex = (scanEnd - windowStart).coerceIn(0L, window.size.toLong()).toInt()
-            val transition = window.findPlainNalTransition(
-                fromIndex = fromIndex,
-                toIndex = toIndex,
-                windowStart = windowStart,
-                payloadSize = payloadSize
-            )
-            if (transition >= 0) return payloadStart + windowStart + transition
+            offset += chunk.size
 
-            nextScanOffset = scanEnd
-            val carrySize = min(window.size, MEDIA_TRANSITION_WINDOW * 2)
-            carry = window.copyOfRange(window.size - carrySize, window.size)
+            if (!oneMbEvaluated && offset >= oneMbPos + ONE_MB_VALIDATION_SPAN) {
+                oneMbEvaluated = true
+                if (oneMbValidated()) {
+                    skipFully(payloadSize - offset)
+                    return ENCRYPTED_PREFIX_LENGTH
+                }
+            }
+            if (oneMbEvaluated && minPos >= 0 && delta - minDelta >= EARLY_EXIT_RISE) break
         }
+        skipFully((payloadSize - offset).coerceAtLeast(0L))
 
-        skipFully(remaining)
+        if (!oneMbEvaluated && oneMbValidated()) return ENCRYPTED_PREFIX_LENGTH
+
+        if (minPos >= 0) {
+            if (delta - minDelta < MIN_PLAIN_EVIDENCE || boundaryAfterMin < 0) return -1L
+            return payloadStart + boundaryAfterMin
+        }
+        if (delta >= MIN_PLAIN_EVIDENCE && firstPlainHit >= 0) {
+            return payloadStart + firstPlainHit
+        }
         return -1L
-    }
-
-    private fun ByteArray.findPlainNalTransition(
-        fromIndex: Int,
-        toIndex: Int,
-        windowStart: Long,
-        payloadSize: Long
-    ): Int {
-        var index = fromIndex.coerceAtLeast(0)
-        val end = toIndex.coerceAtMost(size)
-        while (index < end && index + 6 < size) {
-            val bytesAvailable = payloadSize - windowStart - index
-            if (
-                isNalStart(index, xor = false, bytesAvailable) &&
-                !isNalStart(index, xor = true, bytesAvailable) &&
-                hasTransitionEvidence(index, windowStart, payloadSize)
-            ) {
-                return index
-            }
-            index++
-        }
-        return -1
-    }
-
-    private fun ByteArray.hasTransitionEvidence(index: Int, windowStart: Long, payloadSize: Long): Boolean {
-        val beforeStart = (index - MEDIA_TRANSITION_WINDOW).coerceAtLeast(0)
-        val afterEnd = (index + MEDIA_TRANSITION_WINDOW).coerceAtMost(size)
-        var encryptedBefore = 0
-        var plainAfter = 0
-
-        var before = beforeStart
-        while (before < index && encryptedBefore < MIN_NAL_EVIDENCE) {
-            val bytesAvailable = payloadSize - windowStart - before
-            if (
-                isNalStart(before, xor = true, bytesAvailable) &&
-                !isNalStart(before, xor = false, bytesAvailable)
-            ) encryptedBefore++
-            before++
-        }
-
-        var after = index
-        while (after < afterEnd && plainAfter < MIN_NAL_EVIDENCE) {
-            val bytesAvailable = payloadSize - windowStart - after
-            if (
-                isNalStart(after, xor = false, bytesAvailable) &&
-                !isNalStart(after, xor = true, bytesAvailable)
-            ) plainAfter++
-            after++
-        }
-
-        return encryptedBefore >= MIN_NAL_EVIDENCE && plainAfter >= MIN_NAL_EVIDENCE
     }
 
     private fun ByteArray.isNalStart(offset: Int, xor: Boolean, bytesAvailable: Long): Boolean {

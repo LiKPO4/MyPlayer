@@ -2,6 +2,7 @@ package com.lijialin.myplayer
 
 import android.app.Activity
 import android.app.DownloadManager
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
 import androidx.media3.common.util.UnstableApi
 import io.flutter.embedding.android.FlutterActivity
@@ -115,6 +117,14 @@ class MainActivity : FlutterActivity() {
                             call.argument<String>("url"),
                             call.argument<String>("fileName"),
                             result
+                        )
+                    }
+                    "revealInFileManager" -> {
+                        result.success(
+                            revealInFileManager(
+                                call.argument<String>("uri"),
+                                call.argument<String>("parentUri")
+                            )
                         )
                     }
                     else -> result.notImplemented()
@@ -331,6 +341,48 @@ class MainActivity : FlutterActivity() {
         runCatching { startActivity(installIntent) }
     }
 
+    private fun revealInFileManager(uri: String?, parentUri: String?): String {
+        if (uri.isNullOrEmpty()) return "failed"
+
+        val folderUri = if (!parentUri.isNullOrEmpty()) {
+            Uri.parse(parentUri)
+        } else {
+            runCatching {
+                val treeUriString = getPreferences(MODE_PRIVATE).getString(KEY_DIRECTORY_URI, null)
+                val treeUri = Uri.parse(treeUriString)
+                DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri,
+                    DocumentsContract.getTreeDocumentId(treeUri)
+                )
+            }.getOrNull()
+        }
+        if (folderUri != null) {
+            val folderIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(folderUri, DOCUMENT_DIRECTORY_MIME_TYPE)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            try {
+                startActivity(folderIntent)
+                return "opened_folder"
+            } catch (error: ActivityNotFoundException) {
+                // fall through to opening the video itself
+            } catch (error: Exception) {
+                // fall through to opening the video itself
+            }
+        }
+
+        val videoIntent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(uri), VIDEO_MIME_TYPE)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        return try {
+            startActivity(videoIntent)
+            "opened_video"
+        } catch (error: Exception) {
+            "failed"
+        }
+    }
+
     private fun getSettings(): Map<String, Any> {
         val prefs = getPreferences(MODE_PRIVATE)
         return mapOf(
@@ -346,5 +398,7 @@ class MainActivity : FlutterActivity() {
         const val KEY_DEFAULT_PLAYBACK_SPEED = "default_playback_speed"
         const val KEY_RANDOM_INCLUDE_SUBFOLDERS = "random_include_subfolders"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+        const val DOCUMENT_DIRECTORY_MIME_TYPE = "vnd.android.document/directory"
+        const val VIDEO_MIME_TYPE = "video/*"
     }
 }
