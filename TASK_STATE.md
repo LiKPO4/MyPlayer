@@ -6,7 +6,7 @@
 - 手机已通过无线 ADB 连接（魅族 22），可直接安装 release 包做真机验证。
 - 后续打包优先使用 release 包，避免 debug 包体积过大。
 - 项目已初始化 Git，并推送到公开仓库 `https://github.com/LiKPO4/MyPlayer`。
-- 在线更新已接入 GitHub Releases，当前发布版本为 `1.0.11+12`。
+- 在线更新已接入 GitHub Releases，当前发布版本为 `1.0.12+13`。
 
 ## 已完成
 
@@ -69,6 +69,7 @@
   - Flutter 侧：列表副标题显示红色「· 文件不完整（缺 X）」；播放页收到上报后弹 Snackbar「视频文件不完整，缺少约 X 数据，无法继续播放」。新增顶层 `formatByteSize` 统一字节格式化。
   - 顺带修复既有问题：旧根目录镜像 `app/src/main/java/.../EncryptedVideoFormat.kt` 缺 v15 的 `refineBoundaryForOversizedBox` 与 `ByteArray.indexOf(ByteArray)`，导致 `:app:testDebugUnitTest` 编译失败；已补齐并同步到 v15。
 - 版本 `v1.0.11+12` 已发布：`https://github.com/LiKPO4/MyPlayer/releases/tag/v1.0.11%2B12`（含竖滑原生信息流、标题提取、设置项、搜索排序 + 本轮「文件不完整」检测与提示）。首个 tag 触发的构建因 Flutter 最新 stable 把 Gradle 最低要求提到 8.14 而失败（项目仍是 8.10.2），已将 `release.yml` 固定 `flutter-version: "3.44.0"`（与本地开发/真机验证同一版本）后重指 tag 并发布成功；`gh api .../releases/latest` 返回 `v1.0.11+12`，应用内检查更新可拉到。
+- 升级 Android 构建工具链并放开 release Flutter 固定（根治上一次发版失败）：Gradle `8.10.2 → 8.14.3`、AGP `8.7.0 → 8.11.1`、Kotlin `1.8.22 → 2.2.20`，满足 Flutter 当前最低要求；`release.yml` 移除 `flutter-version` 固定、改随 stable 频道。版本升到 `1.0.12+13`，tag 触发 CI 构建成功，Release `v1.0.12+13` 已发布（APK 52.9MB），并已用本地构建包覆盖安装到魅族 22（versionName=1.0.12）。
 
 ## 未完成
 
@@ -119,6 +120,7 @@
   1. 扫描侧 `复用 0 项缓存`，确认 `recordVersion` 升级触发全量重检；保险箱目录识别出 166 个视频；
   2. 搜索 `59397aa5` 结果显示红色「位于 … · 文件不完整（缺 15.0 MB）」，数值与 `15691400` 字节吻合；
   3. 播放该视频：播到 0:09 后停住，底部弹出「视频文件不完整，缺少约 15.0 MB 数据，无法继续播放」，**不再自动跳下一条**。
+- 工具链升级版验证（2026-09-15）：升级后本地 `:app:compileReleaseKotlin`、根工程 `:app:testDebugUnitTest`、`flutter analyze`、`flutter test`、`flutter build apk --release` 全部通过；GitHub Actions（run 34989801830）成功，Release `v1.0.12+13` 已发布且 APK 资产 uploaded；`adb install -r` 覆盖安装成功（versionName=1.0.12）。
 
 ## 关键命令
 
@@ -132,7 +134,6 @@ Copy-Item -LiteralPath 'build\app\outputs\flutter-apk\app-release.apk' -Destinat
 
 ## 下一步
 
-- **待办（重要）：升级 Android 构建工具链**。Flutter 已把最低要求提到 Gradle ≥ 8.14.0、AGP ≥ 8.11.1、Kotlin ≥ 2.2.20，项目当前是 Gradle 8.10.2 / AGP 8.7.0 / Kotlin 1.8.22。目前靠 `release.yml` 固定 Flutter 3.44.0 绕过；升级时需同步放开该固定，并重新构建 + 真机复测。
 - `59397aa5` 这个视频要能正常播放，只能从原始来源重新拿到完整文件（缺 15.7MB），应用侧无法补救。
 - 若用户需要，可用 `build/boundary_analysis/completeness_probe.py` 对保险箱里其余 165 个文件做一次完整性体检，排查是否还有别的残缺文件。
 - 上表「未完成」里其余真机验证项（标题提取、手势、设置页等）仍待用户复测。
