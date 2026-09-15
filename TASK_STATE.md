@@ -68,6 +68,7 @@
   - `PlayerBridge.onPlayerError` 命中不完整视频时不再静默 `next()`，改为停住并上报 `incomplete_media:<缺失字节数>`；其它错误保持原行为。
   - Flutter 侧：列表副标题显示红色「· 文件不完整（缺 X）」；播放页收到上报后弹 Snackbar「视频文件不完整，缺少约 X 数据，无法继续播放」。新增顶层 `formatByteSize` 统一字节格式化。
   - 顺带修复既有问题：旧根目录镜像 `app/src/main/java/.../EncryptedVideoFormat.kt` 缺 v15 的 `refineBoundaryForOversizedBox` 与 `ByteArray.indexOf(ByteArray)`，导致 `:app:testDebugUnitTest` 编译失败；已补齐并同步到 v15。
+- 版本 `v1.0.11+12` 已发布：`https://github.com/LiKPO4/MyPlayer/releases/tag/v1.0.11%2B12`（含竖滑原生信息流、标题提取、设置项、搜索排序 + 本轮「文件不完整」检测与提示）。首个 tag 触发的构建因 Flutter 最新 stable 把 Gradle 最低要求提到 8.14 而失败（项目仍是 8.10.2），已将 `release.yml` 固定 `flutter-version: "3.44.0"`（与本地开发/真机验证同一版本）后重指 tag 并发布成功；`gh api .../releases/latest` 返回 `v1.0.11+12`，应用内检查更新可拉到。
 
 ## 未完成
 
@@ -131,7 +132,7 @@ Copy-Item -LiteralPath 'build\app\outputs\flutter-apk\app-release.apk' -Destinat
 
 ## 下一步
 
-- 已升版本到 `1.0.11+12`，提交并推送 main，打 tag `v1.0.11+12` 触发 GitHub Actions 发布新 Release。
+- **待办（重要）：升级 Android 构建工具链**。Flutter 已把最低要求提到 Gradle ≥ 8.14.0、AGP ≥ 8.11.1、Kotlin ≥ 2.2.20，项目当前是 Gradle 8.10.2 / AGP 8.7.0 / Kotlin 1.8.22。目前靠 `release.yml` 固定 Flutter 3.44.0 绕过；升级时需同步放开该固定，并重新构建 + 真机复测。
 - `59397aa5` 这个视频要能正常播放，只能从原始来源重新拿到完整文件（缺 15.7MB），应用侧无法补救。
 - 若用户需要，可用 `build/boundary_analysis/completeness_probe.py` 对保险箱里其余 165 个文件做一次完整性体检，排查是否还有别的残缺文件。
 - 上表「未完成」里其余真机验证项（标题提取、手势、设置页等）仍待用户复测。
