@@ -21,9 +21,8 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          # 固定到本地开发与真机验证所用的版本。Flutter 最新 stable 已把 Gradle 最低
-          # 要求提到 8.14，而项目仍是 8.10.2；升级 Gradle/AGP/Kotlin 时再一起放开这里。
-          flutter-version: "3.44.0"
+          # 构建工具链（Gradle 8.14.3 / AGP 8.11.1 / Kotlin 2.2.20）已满足 Flutter
+          # 当前最低要求，不再固定 Flutter 版本，跟随 stable 频道。
           channel: stable
           cache: true
 
