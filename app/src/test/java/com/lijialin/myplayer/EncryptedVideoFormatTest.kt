@@ -259,6 +259,112 @@ class EncryptedVideoFormatTest {
         )
     }
 
+    @Test
+    fun oversizedMoovCrossingOneMbGetsRefinedToOneMb() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        // 真实样例 4822326c：moov 尾部跨过 1MB 工具边界转为明文（样本表 + 子 box），
+        // 首个全明文顶层 box（free）出现在 1MB 之后——它不是 XOR 结束点。
+        val moovEnd = EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH + 2048L
+        val moovSize = (moovEnd - encryptedFtyp.size).toInt()
+        val moovHeader = boxHeader("moov", moovSize).xor()
+        val plainTail = box("stco", 512) + box("udta", 512) + box("hdlr", 256) + box("meta", 640)
+        val moovCipherBody = ByteArray(moovSize - 8 - plainTail.size) { 0x12 }
+        val plainFree = box("free", 8)
+        val plainMdat = box("mdat", 4096)
+        val bytes = encryptedFtyp + moovHeader + moovCipherBody + plainTail + plainFree + plainMdat
+
+        val candidate = EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        assertEquals(moovEnd, candidate)
+
+        assertEquals(
+            EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH,
+            EncryptedVideoFormat.refineBoundaryForOversizedBox(
+                ByteArrayInputStream(bytes),
+                bytes.size.toLong(),
+                candidate
+            )
+        )
+    }
+
+    @Test
+    fun fullyEncryptedOversizedBoxKeepsItsBoundary() {
+        val encryptedFtyp = box("ftyp", 24).xor()
+        // 对照：moov 全程密文（0x12 填充按明文读零率 0、无 box 类型 ASCII），
+        // 候选边界保持不变。
+        val moovEnd = EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH + 2048L
+        val moovSize = (moovEnd - encryptedFtyp.size).toInt()
+        val moovHeader = boxHeader("moov", moovSize).xor()
+        val moovCipherBody = ByteArray(moovSize - 8) { 0x12 }
+        val plainFree = box("free", 8)
+        val plainMdat = box("mdat", 4096)
+        val bytes = encryptedFtyp + moovHeader + moovCipherBody + plainFree + plainMdat
+
+        val candidate = EncryptedVideoFormat.findEncryptedPrefixEnd(ByteArrayInputStream(bytes), bytes.size.toLong())
+        assertEquals(moovEnd, candidate)
+        assertEquals(
+            candidate,
+            EncryptedVideoFormat.refineBoundaryForOversizedBox(
+                ByteArrayInputStream(bytes),
+                bytes.size.toLong(),
+                candidate
+            )
+        )
+    }
+
+    @Test
+    fun reportsMissingBytesWhenMdatDeclaresMoreThanFileHolds() {
+        // 真实样例 59397aa5：ftyp + moov + free 齐全，mdat 声明 15921770 字节，
+        // 但文件只剩 mdat 头之后的 100 字节 —— 应报告缺失字节数。
+        val encryptedFtyp = box("ftyp", 32).xor()
+        val encryptedMoov = box("moov", 64).xor()
+        val encryptedMdatHeader = boxHeader("mdat", 4096).xor()
+        val tail = ByteArray(100) { 0x12 }
+        val bytes = encryptedFtyp + encryptedMoov + encryptedMdatHeader + tail
+        val fileSize = bytes.size.toLong()
+
+        // mdat 应从 96 起、到 4192 结束，文件只有 204 字节。
+        assertEquals(96L + 4096L - fileSize, EncryptedVideoFormat.findMissingTailBytes(ByteArrayInputStream(bytes), fileSize))
+    }
+
+    @Test
+    fun completeBoxChainReportsNothingMissing() {
+        val encryptedFtyp = box("ftyp", 32).xor()
+        val encryptedMdat = box("mdat", 64).xor()
+        // moov 在文件末尾且已过 1MB 工具边界，按明文读取。
+        val plainMoov = box("moov", 48)
+        val bytes = encryptedFtyp + encryptedMdat + plainMoov
+
+        assertEquals(0L, EncryptedVideoFormat.findMissingTailBytes(ByteArrayInputStream(bytes), bytes.size.toLong()))
+    }
+
+    @Test
+    fun unparsableStructureIsNotReportedAsIncomplete() {
+        val bytes = ByteArray(64)
+
+        assertEquals(0L, EncryptedVideoFormat.findMissingTailBytes(ByteArrayInputStream(bytes), bytes.size.toLong()))
+    }
+
+    @Test
+    fun reportsMissingBytesForExtendedLengthMdat() {
+        val encryptedFtyp = box("ftyp", 32).xor()
+        val encryptedMdatHeader = extendedBoxHeader("mdat", 1_000_000L).xor()
+        val tail = ByteArray(64) { 0x12 }
+        val bytes = encryptedFtyp + encryptedMdatHeader + tail
+        val fileSize = bytes.size.toLong()
+
+        assertEquals(1_000_000L + 32L - fileSize, EncryptedVideoFormat.findMissingTailBytes(ByteArrayInputStream(bytes), fileSize))
+    }
+
+    private fun extendedBoxHeader(type: String, size: Long): ByteArray {
+        val bytes = ByteArray(16)
+        bytes[3] = 1
+        type.toByteArray(Charsets.US_ASCII).copyInto(bytes, destinationOffset = 4)
+        for (index in 0 until 8) {
+            bytes[8 + index] = (size shr (56 - index * 8)).toByte()
+        }
+        return bytes
+    }
+
     private fun box(type: String, size: Int): ByteArray {
         val bytes = ByteArray(size)
         boxHeader(type, size).copyInto(bytes)

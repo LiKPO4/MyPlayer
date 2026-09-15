@@ -60,8 +60,50 @@ class EncryptedVideoScanner(
     }
 
     fun enrichTitles(directoryUri: Uri, sourceVideos: List<EncryptedVideo>) {
-        // Keep the visible title as the original file name. Metadata title probing
-        // was both slow on large SAF files and unreliable for these encrypted videos.
+        // 真实标题存在明文 moov 的 ©nam/titl 原子里（加密工具只 XOR 文件前缀）。
+        // displayName 与 fileName 一致说明还没提取过；moov 密文或无标题则保持文件名，
+        // 提取成功的写回扫描缓存与快照，后续扫描不再重复读文件。
+        var renamed = false
+        for (video in sourceVideos) {
+            if (video.displayName != video.fileName) continue
+            val title = runCatching {
+                resolver.openInputStream(video.uri)?.use { stream ->
+                    val moovStart = EncryptedVideoFormat.findEncryptedMoovBoxStart(stream, video.size)
+                    if (moovStart < 0L) {
+                        null
+                    } else {
+                        EncryptedVideoFormat.extractTitleFromMoov(stream, moovStart, video.size)
+                    }
+                }
+            }.getOrNull()
+            if (title.isNullOrBlank() || title == video.displayName) continue
+
+            val renamedVideo = video.copy(displayName = title)
+            val videoIndex = videos.indexOfFirst { it.uri == video.uri }
+            if (videoIndex >= 0) videos[videoIndex] = renamedVideo
+            val entry = entriesByUri[video.uri.toString()]?.copy(name = title, video = renamedVideo)
+                ?: renamedVideo.toEntry(null)
+            entriesByUri[video.uri.toString()] = entry
+            nextCache.optJSONObject(video.uri.toString())?.put("displayName", title)
+            renamed = true
+            progress(event("title") + mapOf("video" to renamedVideo.toMap(), "entry" to entry.toMap()))
+            PlayerBridge.updateTitle(video.uri.toString(), title)
+        }
+        if (renamed) {
+            saveCache(directoryUri, nextCache)
+            saveSnapshot(
+                directoryUri,
+                ScanResult(
+                    entries = entriesByUri.values.sortedWith(
+                        compareByDescending<BrowseEntry> { it.type == "folder" }
+                            .thenBy { it.name.lowercase() }
+                    ),
+                    videos = videos.toList(),
+                    skippedUnsupported = counters.skipped,
+                    failed = counters.failed
+                )
+            )
+        }
     }
 
     private fun scanFolder(parentDocumentId: String, parentUri: String?, ancestorFolderUris: List<String>) {
@@ -202,16 +244,23 @@ class EncryptedVideoScanner(
                 fileName = child.name,
                 size = child.size,
                 lastModified = child.lastModified,
-                xorUntilOffset = 0L
+                xorUntilOffset = 0L,
+                incompleteBytes = missingTailBytes(child)
             )
             rememberBoundary(video)
             return video
         }
 
         if (!EncryptedVideoFormat.hasEncryptedMp4Header(header, headerBytes)) return null
-        val xorUntilOffset = resolver.openInputStream(child.uri)?.use { stream ->
+        var xorUntilOffset = resolver.openInputStream(child.uri)?.use { stream ->
             EncryptedVideoFormat.findEncryptedPrefixEnd(stream, child.size)
         } ?: -1L
+        // moov 等大 box 尾部跨过 1MB 工具边界时，首个明文 box 的起点不是 XOR 结束点。
+        if (xorUntilOffset > EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH) {
+            xorUntilOffset = resolver.openInputStream(child.uri)?.use { verifyStream ->
+                EncryptedVideoFormat.refineBoundaryForOversizedBox(verifyStream, child.size, xorUntilOffset)
+            } ?: xorUntilOffset
+        }
 
         val video = EncryptedVideo(
             uri = child.uri,
@@ -219,10 +268,20 @@ class EncryptedVideoScanner(
             fileName = child.name,
             size = child.size,
             lastModified = child.lastModified,
-            xorUntilOffset = xorUntilOffset
+            xorUntilOffset = xorUntilOffset,
+            incompleteBytes = missingTailBytes(child)
         )
         rememberBoundary(video)
         return video
+    }
+
+    /** 文件末尾缺失的字节数：>0 表示被截断（时长仍按 moov 显示，但媒体数据不存在）。 */
+    private fun missingTailBytes(child: ChildInfo): Long {
+        return runCatching {
+            resolver.openInputStream(child.uri)?.use { stream ->
+                EncryptedVideoFormat.findMissingTailBytes(stream, child.size)
+            } ?: EncryptedVideo.UNKNOWN_INCOMPLETE_BYTES
+        }.getOrDefault(EncryptedVideo.UNKNOWN_INCOMPLETE_BYTES)
     }
 
     private fun rememberBoundary(video: EncryptedVideo) {
@@ -305,11 +364,13 @@ class EncryptedVideoScanner(
 
     private fun EncryptedVideo.toCacheRecord(): JSONObject = JSONObject()
         .put("kind", "video")
+        .put("recordVersion", RECORD_VERSION)
         .put("displayName", displayName)
         .put("fileName", fileName)
         .put("size", size)
         .put("lastModified", lastModified)
         .put("xorUntilOffset", xorUntilOffset)
+        .put("incompleteBytes", incompleteBytes)
 
     private fun EncryptedVideo.toJson(): JSONObject = JSONObject()
         .put("uri", uri.toString())
@@ -318,6 +379,7 @@ class EncryptedVideoScanner(
         .put("size", size)
         .put("lastModified", lastModified)
         .put("xorUntilOffset", xorUntilOffset)
+        .put("incompleteBytes", incompleteBytes)
 
     private fun BrowseEntry.toJson(): JSONObject = JSONObject()
         .put("type", type)
@@ -331,6 +393,7 @@ class EncryptedVideoScanner(
 
     private fun unsupportedRecord(child: ChildInfo): JSONObject = JSONObject()
         .put("kind", "unsupported")
+        .put("recordVersion", RECORD_VERSION)
         .put("size", child.size)
         .put("lastModified", child.lastModified)
 
@@ -342,7 +405,8 @@ class EncryptedVideoScanner(
             fileName = optString("fileName", child.name),
             size = optLong("size"),
             lastModified = optLong("lastModified"),
-            xorUntilOffset = optLong("xorUntilOffset", -1L)
+            xorUntilOffset = optLong("xorUntilOffset", -1L),
+            incompleteBytes = optLong("incompleteBytes", EncryptedVideo.UNKNOWN_INCOMPLETE_BYTES)
         )
     }
 
@@ -380,7 +444,8 @@ class EncryptedVideoScanner(
             fileName = optString("fileName", optString("displayName")),
             size = optLong("size"),
             lastModified = optLong("lastModified"),
-            xorUntilOffset = optLong("xorUntilOffset", -1L)
+            xorUntilOffset = optLong("xorUntilOffset", -1L),
+            incompleteBytes = optLong("incompleteBytes", EncryptedVideo.UNKNOWN_INCOMPLETE_BYTES)
         )
     }
 
@@ -394,7 +459,9 @@ class EncryptedVideoScanner(
     }
 
     private fun JSONObject.isFresh(child: ChildInfo): Boolean {
-        return optLong("size") == child.size && optLong("lastModified") == child.lastModified
+        return optLong("size") == child.size &&
+            optLong("lastModified") == child.lastModified &&
+            optInt("recordVersion", 0) >= RECORD_VERSION
     }
 
     private fun android.database.Cursor.getLongOrZero(column: Int): Long {
@@ -424,5 +491,11 @@ class EncryptedVideoScanner(
             skipped = 0
             failed = 0
         }
+    }
+
+    private companion object {
+        /** 扫描缓存记录格式版本：调整记录结构时必须 +1，老记录会重新检测一次。
+         *  v2 起记录 incompleteBytes（文件是否被截断）。 */
+        const val RECORD_VERSION = 2
     }
 }

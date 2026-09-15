@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <!--
+      TextureView participates in RecyclerView/ViewPager transforms. SurfaceView renders in a
+      separate surface layer, which can leave a black or stationary frame while a page moves.
+    -->
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/video_player"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        app:keep_content_on_player_reset="true"
+        app:resize_mode="fit"
+        app:show_buffering="never"
+        app:shutter_background_color="@android:color/black"
+        app:surface_type="texture_view"
+        app:use_controller="false" />
+</FrameLayout>

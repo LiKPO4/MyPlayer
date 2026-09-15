@@ -58,6 +58,8 @@ dependencies {
     val media3Version = "1.10.1"
 
     implementation("androidx.documentfile:documentfile:1.1.0")
+    // ViewPager2 supplies the native, interruptible vertical paging physics used by the video feed.
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-ui:$media3Version")
 }

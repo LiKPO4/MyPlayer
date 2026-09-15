@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -52,6 +54,9 @@ class NativeBridge {
   static const EventChannel _playerEvents = EventChannel(
     'myplayer/player_events',
   );
+  static const EventChannel _playerUiEvents = EventChannel(
+    'myplayer/player_ui_events',
+  );
 
   static Stream<Map<String, dynamic>> get scanEvents {
     return _scanEvents.receiveBroadcastStream().map((event) {
@@ -65,6 +70,13 @@ class NativeBridge {
         Map<String, dynamic>.from(event as Map),
       );
     });
+  }
+
+  static Stream<String> get playerUiEvents {
+    return _playerUiEvents
+        .receiveBroadcastStream()
+        .where((event) => event is String)
+        .cast<String>();
   }
 
   static Future<ScanResult?> chooseFolder() async {
@@ -121,6 +133,43 @@ class NativeBridge {
 
   static Future<void> setSpeed(double speed) {
     return _methods.invokeMethod<void>('setSpeed', {'speed': speed});
+  }
+
+  static Future<void> setEndAction(String action) {
+    return _methods.invokeMethod<void>('setEndAction', {'action': action});
+  }
+
+  static Future<void> setDefaultShuffle(bool enabled) {
+    return _methods.invokeMethod<void>('setDefaultShuffle', {
+      'enabled': enabled,
+    });
+  }
+
+  /// mode: 'name' | 'time' | 'size'
+  static Future<void> setSortMode(String mode) {
+    return _methods.invokeMethod<void>('setSortMode', {'mode': mode});
+  }
+
+  /// value 取 0..1；传 -1 恢复为跟随系统亮度（仅作用于本页面窗口）。
+  static Future<void> setScreenBrightness(double value) {
+    return _methods.invokeMethod<void>('setScreenBrightness', {
+      'value': value,
+    });
+  }
+
+  static Future<double> getScreenBrightness() async {
+    final result = await _methods.invokeMethod<double>('getScreenBrightness');
+    return (result as num?)?.toDouble() ?? 0.5;
+  }
+
+  /// value 取 0..1 的媒体音量比例。
+  static Future<void> setMusicVolume(double value) {
+    return _methods.invokeMethod<void>('setMusicVolume', {'value': value});
+  }
+
+  static Future<double> getMusicVolume() async {
+    final result = await _methods.invokeMethod<double>('getMusicVolume');
+    return (result as num?)?.toDouble() ?? 0.5;
   }
 
   static Future<Set<String>> getRandomPlayedUris() async {
@@ -372,27 +421,45 @@ class AppSettings {
   const AppSettings({
     this.defaultPlaybackSpeed = 1.0,
     this.randomIncludeSubfolders = false,
+    this.playbackEndAction = 'next',
+    this.defaultShuffle = false,
+    this.sortMode = 'name',
   });
 
   final double defaultPlaybackSpeed;
   final bool randomIncludeSubfolders;
+  /// 'next' | 'replay' | 'stop'
+  final String playbackEndAction;
+  /// 默认播放模式：false 顺序、true 随机。
+  final bool defaultShuffle;
+  /// 列表排序：'name'（A→Z）/ 'time'（新→旧）/ 'size'（大→小）。
+  final String sortMode;
 
   factory AppSettings.fromMap(Map<String, dynamic> map) {
     return AppSettings(
       defaultPlaybackSpeed:
           (map['defaultPlaybackSpeed'] as num? ?? 1.0).toDouble(),
       randomIncludeSubfolders: map['randomIncludeSubfolders'] as bool? ?? false,
+      playbackEndAction: map['playbackEndAction'] as String? ?? 'next',
+      defaultShuffle: map['defaultShuffle'] as bool? ?? false,
+      sortMode: map['sortMode'] as String? ?? 'name',
     );
   }
 
   AppSettings copyWith({
     double? defaultPlaybackSpeed,
     bool? randomIncludeSubfolders,
+    String? playbackEndAction,
+    bool? defaultShuffle,
+    String? sortMode,
   }) {
     return AppSettings(
       defaultPlaybackSpeed: defaultPlaybackSpeed ?? this.defaultPlaybackSpeed,
       randomIncludeSubfolders:
           randomIncludeSubfolders ?? this.randomIncludeSubfolders,
+      playbackEndAction: playbackEndAction ?? this.playbackEndAction,
+      defaultShuffle: defaultShuffle ?? this.defaultShuffle,
+      sortMode: sortMode ?? this.sortMode,
     );
   }
 }
@@ -405,6 +472,7 @@ class EncryptedVideo {
     required this.size,
     required this.lastModified,
     required this.xorUntilOffset,
+    this.incompleteBytes = -1,
   });
 
   final String uri;
@@ -414,6 +482,11 @@ class EncryptedVideo {
   final int lastModified;
   final int xorUntilOffset;
 
+  /// 文件末尾缺失的字节数：>0 表示文件被截断，0 表示完整，-1 表示尚未检测。
+  final int incompleteBytes;
+
+  bool get isIncomplete => incompleteBytes > 0;
+
   factory EncryptedVideo.fromMap(Map<String, dynamic> map) {
     return EncryptedVideo(
       uri: map['uri'] as String,
@@ -422,6 +495,7 @@ class EncryptedVideo {
       size: (map['size'] as num).toInt(),
       lastModified: (map['lastModified'] as num).toInt(),
       xorUntilOffset: (map['xorUntilOffset'] as num).toInt(),
+      incompleteBytes: (map['incompleteBytes'] as num? ?? -1).toInt(),
     );
   }
 
@@ -433,8 +507,23 @@ class EncryptedVideo {
       'size': size,
       'lastModified': lastModified,
       'xorUntilOffset': xorUntilOffset,
+      'incompleteBytes': incompleteBytes,
     };
   }
+}
+
+String formatByteSize(int size) {
+  if (size <= 0) return '未知大小';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  var value = size.toDouble();
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return unit == 0
+      ? '${value.toInt()} ${units[unit]}'
+      : '${value.toStringAsFixed(1)} ${units[unit]}';
 }
 
 class BrowserEntry {
@@ -599,6 +688,7 @@ class BrowserPage extends StatefulWidget {
 
 class _BrowserPageState extends State<BrowserPage> {
   final Random _random = Random();
+  final TextEditingController _searchController = TextEditingController();
   StreamSubscription<Map<String, dynamic>>? _progressSubscription;
 
   List<BrowserEntry> _entries = const [];
@@ -608,6 +698,90 @@ class _BrowserPageState extends State<BrowserPage> {
   ScanProgress? _progress;
   String _message = '请选择根目录';
   bool _scanning = false;
+  bool _searching = false;
+  String _searchQuery = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _progressSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _enterSearch() {
+    setState(() => _searching = true);
+  }
+
+  void _exitSearch() {
+    setState(() {
+      _searching = false;
+      _searchQuery = '';
+      _searchController.clear();
+    });
+  }
+
+  /// 排序选择：名称（A→Z）/ 时间（新→旧）/ 大小（大→小）。
+  Future<void> _showSortSheet() async {
+    final mode = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.white,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final option in const [
+              ('name', '按名称', Icons.sort_by_alpha_rounded),
+              ('time', '按时间', Icons.schedule_rounded),
+              ('size', '按大小', Icons.sd_storage_rounded),
+            ])
+              ListTile(
+                leading: Icon(option.$3),
+                title: Text(option.$2),
+                trailing:
+                    _settings.sortMode == option.$1
+                        ? const Icon(
+                          Icons.check_rounded,
+                          color: Color(0xFF1BB98B),
+                        )
+                        : null,
+                onTap: () => Navigator.of(sheetContext).pop(option.$1),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (mode == null) return;
+    await NativeBridge.setSortMode(mode);
+    if (!mounted) return;
+    setState(() {
+      _settings = _settings.copyWith(sortMode: mode);
+    });
+  }
+
+  /// 全库搜索：按视频标题（displayName）与文件名过滤，大小写不敏感。
+  List<BrowserEntry> get _searchResults {
+    final query = _searchQuery.trim().toLowerCase();
+    if (query.isEmpty) return const [];
+    return _sortEntries(
+      _entries
+          .where(
+            (entry) =>
+                entry.isVideo &&
+                entry.video != null &&
+                (entry.name.toLowerCase().contains(query) ||
+                    entry.video!.fileName.toLowerCase().contains(query)),
+          )
+          .toList(),
+    );
+  }
+
+  String? _folderNameOf(String? parentUri) {
+    if (parentUri == null) return null;
+    for (final entry in _entries) {
+      if (entry.isFolder && entry.uri == parentUri) return entry.name;
+    }
+    return null;
+  }
 
   String? get _currentParentUri =>
       _folderStack.isEmpty ? null : _folderStack.last.uri;
@@ -663,12 +837,18 @@ class _BrowserPageState extends State<BrowserPage> {
       final progress = ScanProgress.fromMap(event);
       setState(() {
         _progress = progress;
-        _scanning = progress.phase != 'done';
-        _message = _scanMessage(progress);
+        // title 事件发生在扫描完成后，属于增量标题刷新，不应把界面拉回“扫描中”。
+        _scanning = progress.phase != 'done' && progress.phase != 'title';
+        if (phase != 'title') {
+          _message = _scanMessage(progress);
+        }
         if (phase == 'reset') {
           _entries = const [];
           _videos = const [];
           _folderStack = const [];
+          _searching = false;
+          _searchQuery = '';
+          _searchController.clear();
         } else if (phase == 'item') {
           final entryMap = event['entry'];
           if (entryMap != null) {
@@ -685,6 +865,21 @@ class _BrowserPageState extends State<BrowserPage> {
               ),
             );
           }
+        } else if (phase == 'title') {
+          final videoMap = event['video'];
+          if (videoMap != null) {
+            _upsertVideo(
+              EncryptedVideo.fromMap(
+                Map<String, dynamic>.from(videoMap as Map),
+              ),
+            );
+          }
+          final entryMap = event['entry'];
+          if (entryMap != null) {
+            _upsertEntry(
+              BrowserEntry.fromMap(Map<String, dynamic>.from(entryMap as Map)),
+            );
+          }
         }
       });
     });
@@ -692,12 +887,6 @@ class _BrowserPageState extends State<BrowserPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       UpdateService.check(context, silent: true);
     });
-  }
-
-  @override
-  void dispose() {
-    _progressSubscription?.cancel();
-    super.dispose();
   }
 
   Future<void> _restore() async {
@@ -796,20 +985,26 @@ class _BrowserPageState extends State<BrowserPage> {
   List<BrowserEntry> _sortEntries(List<BrowserEntry> entries) {
     return entries..sort((a, b) {
       if (a.isFolder != b.isFolder) return a.isFolder ? -1 : 1;
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      return switch (_settings.sortMode) {
+        'time' => b.lastModified.compareTo(a.lastModified),
+        'size' => b.size.compareTo(a.size),
+        _ => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+      };
     });
   }
 
   Future<void> _playVideo(
     EncryptedVideo video, {
-    bool shuffle = false,
+    /// 不传时用设置里的默认播放模式；随机播放入口显式传 true。
+    bool? shuffle,
     List<EncryptedVideo>? playlistOverride,
   }) async {
+    final effectiveShuffle = shuffle ?? _settings.defaultShuffle;
     final playlist = playlistOverride ?? _currentVideos;
     final index = playlist.indexWhere((item) => item.uri == video.uri);
     if (index < 0) return;
     await NativeBridge.setPlaylist(playlist);
-    await NativeBridge.setShuffle(shuffle);
+    await NativeBridge.setShuffle(effectiveShuffle);
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -817,9 +1012,10 @@ class _BrowserPageState extends State<BrowserPage> {
             (_) => PlayerPage(
               title: video.displayName,
               initialIndex: index,
-              shuffle: shuffle,
+              shuffle: effectiveShuffle,
               playlist: playlist,
               defaultPlaybackSpeed: _settings.defaultPlaybackSpeed,
+              playbackEndAction: _settings.playbackEndAction,
             ),
       ),
     );
@@ -829,29 +1025,30 @@ class _BrowserPageState extends State<BrowserPage> {
     final action = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.white,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(
-                Icons.play_circle_fill_rounded,
-                color: Color(0xFF1BB98B),
-              ),
-              title: const Text('播放'),
-              onTap: () => Navigator.of(sheetContext).pop('play'),
+      builder:
+          (sheetContext) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(
+                    Icons.play_circle_fill_rounded,
+                    color: Color(0xFF1BB98B),
+                  ),
+                  title: const Text('播放'),
+                  onTap: () => Navigator.of(sheetContext).pop('play'),
+                ),
+                ListTile(
+                  leading: const Icon(
+                    Icons.folder_open_rounded,
+                    color: Color(0xFF1FC196),
+                  ),
+                  title: const Text('在文件管理器中显示'),
+                  onTap: () => Navigator.of(sheetContext).pop('reveal'),
+                ),
+              ],
             ),
-            ListTile(
-              leading: const Icon(
-                Icons.folder_open_rounded,
-                color: Color(0xFF1FC196),
-              ),
-              title: const Text('在文件管理器中显示'),
-              onTap: () => Navigator.of(sheetContext).pop('reveal'),
-            ),
-          ],
-        ),
-      ),
+          ),
     );
     if (!mounted) return;
     if (action == 'play') {
@@ -863,6 +1060,10 @@ class _BrowserPageState extends State<BrowserPage> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('没有找到可处理的应用')));
+      } else if (result == 'opened_chooser') {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('请在列表中选择文件管理器打开：${entry.name}')));
       }
     }
   }
@@ -920,51 +1121,155 @@ class _BrowserPageState extends State<BrowserPage> {
       body: Column(
         children: [
           _Header(
-            title: _currentTitle,
-            canGoBack: _folderStack.isNotEmpty,
+            title: _searching ? '搜索' : _currentTitle,
+            canGoBack: !_searching && _folderStack.isNotEmpty,
             scanning: _scanning,
             progress: _progress,
-            message: _message,
+            message: _searching ? '按视频标题或文件名搜索整个资料库' : _message,
             onBack: _goUpFolder,
             onChooseFolder: _chooseFolder,
             onRefresh: _refresh,
             onOpenSettings: _openSettings,
+            onSearch: _enterSearch,
+            onSort: _showSortSheet,
           ),
           Expanded(
-            child:
-                currentEntries.isEmpty
-                    ? EmptyState(onChooseFolder: _chooseFolder)
-                    : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(0, 14, 0, 104),
-                      itemCount: currentEntries.length,
-                      itemBuilder: (context, index) {
-                        final entry = currentEntries[index];
-                        return BrowserEntryTile(
-                          entry: entry,
-                          onTap: () {
-                            if (entry.isVideo) {
-                              _playVideo(entry.video!);
-                            } else {
-                              _enterFolder(entry);
-                            }
-                          },
-                          onLongPress: entry.isVideo
+            child: _searching
+                ? _buildSearchView()
+                : currentEntries.isEmpty
+                ? EmptyState(onChooseFolder: _chooseFolder)
+                : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(0, 14, 0, 104),
+                  itemCount: currentEntries.length,
+                  itemBuilder: (context, index) {
+                    final entry = currentEntries[index];
+                    return BrowserEntryTile(
+                      entry: entry,
+                      onTap: () {
+                        if (entry.isVideo) {
+                          _playVideo(entry.video!);
+                        } else {
+                          _enterFolder(entry);
+                        }
+                      },
+                      onLongPress:
+                          entry.isVideo
                               ? () => _showVideoActions(entry)
                               : null,
-                        );
-                      },
-                    ),
+                    );
+                  },
+                ),
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.small(
-        heroTag: 'randomPlay',
-        backgroundColor: const Color(0xFF1BB98B),
-        foregroundColor: Colors.white,
-        onPressed: _randomPlay,
-        tooltip: '随机播放',
-        child: const Icon(Icons.shuffle_rounded, size: 22),
-      ),
+      floatingActionButton: _searching
+          ? null
+          : FloatingActionButton.small(
+              heroTag: 'randomPlay',
+              backgroundColor: const Color(0xFF1BB98B),
+              foregroundColor: Colors.white,
+              onPressed: _randomPlay,
+              tooltip: '随机播放',
+              child: const Icon(Icons.shuffle_rounded, size: 22),
+            ),
+    );
+  }
+
+  Widget _buildSearchView() {
+    final results = _searchResults;
+    final query = _searchQuery.trim();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 10, 14, 4),
+          child: Row(
+            children: [
+              IconButton(
+                tooltip: '退出搜索',
+                onPressed: _exitSearch,
+                color: const Color(0xFF303149),
+                icon: const Icon(Icons.arrow_back_rounded),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _searchController,
+                  autofocus: true,
+                  onChanged: (value) => setState(() => _searchQuery = value),
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    hintText: '搜索全部视频',
+                    isDense: true,
+                    prefixIcon: const Icon(
+                      Icons.search_rounded,
+                      size: 22,
+                      color: Color(0xFF92A0B8),
+                    ),
+                    suffixIcon:
+                        _searchQuery.isEmpty
+                            ? null
+                            : IconButton(
+                              icon: const Icon(Icons.close_rounded, size: 20),
+                              onPressed: () {
+                                _searchController.clear();
+                                setState(() => _searchQuery = '');
+                              },
+                            ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(999),
+                      borderSide: BorderSide.none,
+                    ),
+                    filled: true,
+                    fillColor: const Color(0xFFF1F4F9),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 18, 6),
+          child: Text(
+            query.isEmpty
+                ? '输入关键字开始搜索'
+                : results.isEmpty
+                ? '没有匹配“$query”的视频'
+                : '找到 ${results.length} 个视频',
+            style: const TextStyle(
+              color: Color(0xFF8A96AD),
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Expanded(
+          child:
+              results.isEmpty
+                  ? const SizedBox.shrink()
+                  : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(0, 4, 0, 24),
+                    itemCount: results.length,
+                    itemBuilder: (context, index) {
+                      final entry = results[index];
+                      final folderName = _folderNameOf(entry.parentUri);
+                      return BrowserEntryTile(
+                        entry: entry,
+                        subtitleOverride: folderName == null
+                            ? null
+                            : '位于 $folderName',
+                        onTap: () {
+                          _playVideo(
+                            entry.video!,
+                            playlistOverride:
+                                results.map((item) => item.video!).toList(),
+                          );
+                        },
+                        onLongPress: () => _showVideoActions(entry),
+                      );
+                    },
+                  ),
+        ),
+      ],
     );
   }
 
@@ -992,6 +1297,8 @@ class _Header extends StatelessWidget {
     required this.onChooseFolder,
     required this.onRefresh,
     required this.onOpenSettings,
+    required this.onSearch,
+    required this.onSort,
   });
 
   final String title;
@@ -1003,6 +1310,8 @@ class _Header extends StatelessWidget {
   final VoidCallback onChooseFolder;
   final VoidCallback onRefresh;
   final VoidCallback onOpenSettings;
+  final VoidCallback onSearch;
+  final VoidCallback onSort;
 
   @override
   Widget build(BuildContext context) {
@@ -1041,6 +1350,20 @@ class _Header extends StatelessWidget {
                           letterSpacing: 0,
                         ),
                       ),
+                    ),
+                    IconButton(
+                      tooltip: '搜索',
+                      color: Colors.white,
+                      iconSize: 26,
+                      onPressed: onSearch,
+                      icon: const Icon(Icons.search_rounded),
+                    ),
+                    IconButton(
+                      tooltip: '排序',
+                      color: Colors.white,
+                      iconSize: 26,
+                      onPressed: onSort,
+                      icon: const Icon(Icons.sort_rounded),
                     ),
                     IconButton(
                       tooltip: '设置',
@@ -1171,12 +1494,34 @@ class _SettingsPageState extends State<SettingsPage> {
               },
             ),
           ),
+          ListTile(
+            leading: const Icon(Icons.playlist_play_rounded),
+            title: const Text('默认播放模式'),
+            trailing: DropdownButton<bool>(
+              value: _settings.defaultShuffle,
+              underline: const SizedBox.shrink(),
+              items: const [
+                DropdownMenuItem<bool>(value: false, child: Text('顺序')),
+                DropdownMenuItem<bool>(value: true, child: Text('随机')),
+              ],
+              onChanged: (shuffle) {
+                if (shuffle != null) _setDefaultShuffle(shuffle);
+              },
+            ),
+          ),
           SwitchListTile(
             secondary: const Icon(Icons.account_tree_rounded),
             title: const Text('随机子文件夹视频'),
             subtitle: const Text('随机播放时包含当前目录下的子文件夹视频'),
             value: _settings.randomIncludeSubfolders,
             onChanged: _setRandomIncludeSubfolders,
+          ),
+          ListTile(
+            leading: const Icon(Icons.near_me_rounded),
+            title: const Text('播放完成后'),
+            subtitle: Text(_endActionLabel(_settings.playbackEndAction)),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: _showEndActionSheet,
           ),
           ListTile(
             leading: const Icon(Icons.cleaning_services_rounded),
@@ -1189,7 +1534,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       height: 22,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                    : const Icon(Icons.chevron_right_rounded),
+                    : const SizedBox.shrink(),
             onTap: _clearingRandomHistory ? null : _clearRandomHistory,
           ),
           ListTile(
@@ -1203,7 +1548,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       height: 22,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                    : const Icon(Icons.chevron_right_rounded),
+                    : const SizedBox.shrink(),
             onTap: _checkingForUpdate ? null : _checkForUpdate,
           ),
         ],
@@ -1219,6 +1564,14 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
+  Future<void> _setDefaultShuffle(bool shuffle) async {
+    await NativeBridge.setDefaultShuffle(shuffle);
+    if (!mounted) return;
+    setState(() {
+      _settings = _settings.copyWith(defaultShuffle: shuffle);
+    });
+  }
+
   Future<void> _setRandomIncludeSubfolders(bool enabled) async {
     await NativeBridge.setRandomIncludeSubfolders(enabled);
     if (!mounted) return;
@@ -1227,7 +1580,76 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
+  Future<void> _showEndActionSheet() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final entry in const [
+              ('next', '播放下一个', '当前列表播完后自动切到下一个视频'),
+              ('replay', '重新播放', '播完后从头再来一遍'),
+              ('stop', '停止', '播完后停在最后一帧'),
+            ])
+              ListTile(
+                leading: Icon(
+                  switch (entry.$1) {
+                    'replay' => Icons.replay_rounded,
+                    'stop' => Icons.stop_rounded,
+                    _ => Icons.skip_next_rounded,
+                  },
+                ),
+                title: Text(entry.$2),
+                subtitle: Text(entry.$3),
+                trailing:
+                    _settings.playbackEndAction == entry.$1
+                        ? const Icon(
+                          Icons.check_rounded,
+                          color: Color(0xFF1BB98B),
+                        )
+                        : null,
+                onTap: () => Navigator.of(sheetContext).pop(entry.$1),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (action == null) return;
+    await NativeBridge.setEndAction(action);
+    if (!mounted) return;
+    setState(() {
+      _settings = _settings.copyWith(playbackEndAction: action);
+    });
+  }
+
+  String _endActionLabel(String action) {
+    return switch (action) {
+      'replay' => '重新播放',
+      'stop' => '停止',
+      _ => '播放下一个',
+    };
+  }
+
   Future<void> _clearRandomHistory() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清除随机记录'),
+        content: const Text('清除后，已随机播放过的视频可以再次被随机抽到。确定清除吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('清除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
     setState(() => _clearingRandomHistory = true);
     await NativeBridge.clearRandomPlayed();
     if (!mounted) return;
@@ -1255,15 +1677,27 @@ class BrowserEntryTile extends StatelessWidget {
     required this.entry,
     required this.onTap,
     this.onLongPress,
+    this.subtitleOverride,
   });
 
   final BrowserEntry entry;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
+  /// 覆盖默认的“大小/N 个视频”副标题（搜索结果里显示所在文件夹）。
+  final String? subtitleOverride;
 
   @override
   Widget build(BuildContext context) {
     final isFolder = entry.isFolder;
+    final missingBytes = entry.video?.incompleteBytes ?? 0;
+    final isIncomplete = missingBytes > 0;
+    final baseSubtitle =
+        subtitleOverride ??
+        (isFolder ? '${entry.videoCount} 个视频' : formatByteSize(entry.size));
+    final subtitle =
+        isIncomplete
+            ? '$baseSubtitle · 文件不完整（缺 ${formatByteSize(missingBytes)}）'
+            : baseSubtitle;
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
@@ -1293,11 +1727,12 @@ class BrowserEntryTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    isFolder
-                        ? '${entry.videoCount} 个视频'
-                        : _formatSize(entry.size),
-                    style: const TextStyle(
-                      color: Color(0xFF92A0B8),
+                    subtitle,
+                    style: TextStyle(
+                      color:
+                          isIncomplete
+                              ? const Color(0xFFD14343)
+                              : const Color(0xFF92A0B8),
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
                       letterSpacing: 0,
@@ -1316,20 +1751,6 @@ class BrowserEntryTile extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  String _formatSize(int size) {
-    if (size <= 0) return '未知大小';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    var value = size.toDouble();
-    var unit = 0;
-    while (value >= 1024 && unit < units.length - 1) {
-      value /= 1024;
-      unit++;
-    }
-    return unit == 0
-        ? '${value.toInt()} ${units[unit]}'
-        : '${value.toStringAsFixed(1)} ${units[unit]}';
   }
 }
 
@@ -1443,6 +1864,7 @@ class PlayerPage extends StatefulWidget {
     required this.shuffle,
     required this.playlist,
     required this.defaultPlaybackSpeed,
+    required this.playbackEndAction,
   });
 
   final String title;
@@ -1450,6 +1872,7 @@ class PlayerPage extends StatefulWidget {
   final bool shuffle;
   final List<EncryptedVideo> playlist;
   final double defaultPlaybackSpeed;
+  final String playbackEndAction;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -1457,6 +1880,7 @@ class PlayerPage extends StatefulWidget {
 
 class _PlayerPageState extends State<PlayerPage> {
   StreamSubscription<PlayerPlaybackState>? _playerSubscription;
+  StreamSubscription<String>? _playerUiSubscription;
   bool _shuffle = false;
   bool _landscape = false;
   bool _portrait = false;
@@ -1473,6 +1897,22 @@ class _PlayerPageState extends State<PlayerPage> {
   double _playbackSpeed = 1.0;
   double _holdSpeed = 3.0;
   int? _lastMarkedRandomIndex;
+
+  // 左右两侧竖滑调节亮度/音量的手势状态。
+  double? _adjustStartDy;
+  double? _adjustBaseValue;
+  bool _adjustIsBrightness = false;
+  double? _adjustIndicatorValue;
+  Timer? _adjustIndicatorTimer;
+  double _brightness = 1.0;
+  double _volume = 0.5;
+
+  // 最近一次"单击导致菜单隐藏"的时间，用于把 300ms 后到达的 tap_confirmed
+  // 与那次单击配对，避免隐藏后又把菜单弹回（配对窗口只需覆盖确认延迟）。
+  DateTime? _tapHideAt;
+
+  /// 原生播放出错且原因是文件被截断时携带缺失字节数上报的前缀。
+  static const String _incompleteMediaPrefix = 'incomplete_media:';
 
   @override
   void initState() {
@@ -1491,7 +1931,34 @@ class _PlayerPageState extends State<PlayerPage> {
       });
       _markRandomIndex(state.currentIndex);
     });
+    _playerUiSubscription = NativeBridge.playerUiEvents.listen((event) {
+      if (!mounted) return;
+      // 菜单可见时抬指立即隐藏；不可见时等双击确认窗口过后再呼出，
+      // 双击暂停全程菜单不闪现。tap_confirmed 若属于刚执行过隐藏的那次
+      // 单击（tap_hide_at 配对），则不能把菜单重新弹回。
+      if (event == 'tap_up') {
+        if (_controlsVisible) {
+          _tapHideAt = DateTime.now();
+          _toggleControls();
+        }
+      } else if (event == 'tap_confirmed') {
+        final hideAt = _tapHideAt;
+        _tapHideAt = null;
+        final sameTap =
+            hideAt != null &&
+            DateTime.now().difference(hideAt) <
+                const Duration(milliseconds: 450);
+        if (!_controlsVisible && !sameTap) _toggleControls();
+      } else if (event == 'double_tap_playpause') {
+        NativeBridge.playPause();
+      } else if (event.startsWith(_incompleteMediaPrefix)) {
+        _showIncompleteMediaNotice(event.substring(_incompleteMediaPrefix.length));
+      }
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await NativeBridge.setEndAction(widget.playbackEndAction);
+      _brightness = await NativeBridge.getScreenBrightness();
+      _volume = await NativeBridge.getMusicVolume();
       await NativeBridge.setShuffle(_shuffle);
       await NativeBridge.playAt(widget.initialIndex);
       await NativeBridge.setSpeed(_playbackSpeed);
@@ -1500,10 +1967,27 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   void dispose() {
+    _adjustIndicatorTimer?.cancel();
+    _playerUiSubscription?.cancel();
     _playerSubscription?.cancel();
-    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+    NativeBridge.setScreenBrightness(-1);
     NativeBridge.setSpeed(1.0);
     super.dispose();
+  }
+
+  /// 文件被截断时原生会停住并上报缺失字节数：这里说明原因，不再静默跳到下一条。
+  void _showIncompleteMediaNotice(String rawMissingBytes) {
+    final missingBytes = int.tryParse(rawMissingBytes) ?? 0;
+    if (missingBytes <= 0) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '视频文件不完整，缺少约 ${formatByteSize(missingBytes)} 数据，无法继续播放',
+        ),
+        duration: const Duration(seconds: 8),
+      ),
+    );
   }
 
   @override
@@ -1513,14 +1997,9 @@ class _PlayerPageState extends State<PlayerPage> {
       body: SafeArea(
         child: Stack(
           children: [
-            const Positioned.fill(
-              child: AndroidView(viewType: 'myplayer/player'),
-            ),
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onTap: _toggleControls,
-                onDoubleTap: NativeBridge.playPause,
                 onLongPressStart: (_) => _startHoldSpeed(),
                 onLongPressEnd: (_) => _endHoldSpeed(),
                 onLongPressCancel: _endHoldSpeed,
@@ -1528,8 +2007,23 @@ class _PlayerPageState extends State<PlayerPage> {
                 onHorizontalDragUpdate: _updateSeekGesture,
                 onHorizontalDragEnd: (_) => _finishSeekGesture(),
                 onHorizontalDragCancel: _cancelSeekGesture,
+                child: AndroidView(
+                  viewType: 'myplayer/player',
+                  // Tap/vertical-drag recognizers belong to the platform view's
+                  // gesture team so native ViewPager2 receives the complete
+                  // sequence for taps and feed paging without delay.
+                  gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+                    Factory<TapGestureRecognizer>(() => TapGestureRecognizer()),
+                    Factory<VerticalDragGestureRecognizer>(
+                      () => VerticalDragGestureRecognizer(),
+                    ),
+                  },
+                ),
               ),
             ),
+            // 左右各 20% 区域：竖滑调节亮度/音量；中间区域保持原生竖滑换视频。
+            _adjustLayer(isLeft: true),
+            _adjustLayer(isLeft: false),
             if (_controlsVisible)
               Positioned(
                 left: 8,
@@ -1574,23 +2068,71 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
               ),
             if (_holdingSpeed)
-              Center(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.62),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 10,
+              Positioned(
+                left: 0,
+                right: 0,
+                top: 12,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.62),
+                      borderRadius: BorderRadius.circular(999),
                     ),
-                    child: Text(
-                      '${_formatSpeed(_holdSpeed)}速播放中',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 10,
+                      ),
+                      child: Text(
+                        '${_formatSpeed(_holdSpeed)}速播放中',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (_adjustIndicatorValue != null)
+              Positioned(
+                left: 0,
+                right: 0,
+                top: 60,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.62),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 10,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _adjustIsBrightness
+                                ? Icons.brightness_6_rounded
+                                : Icons.volume_up_rounded,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '${(_adjustIndicatorValue! * 100).round()}%',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -1730,6 +2272,64 @@ class _PlayerPageState extends State<PlayerPage> {
     });
   }
 
+  /// 左右两侧 20% 宽的透明手势层：左侧竖滑调亮度、右侧竖滑调音量。
+  /// 单击/双击在本层直接处理（不经原生转发，响应更快）。
+  Widget _adjustLayer({required bool isLeft}) {
+    final width = MediaQuery.sizeOf(context).width * 0.2;
+    return Positioned(
+      left: isLeft ? 0 : null,
+      right: isLeft ? null : 0,
+      top: 0,
+      bottom: 0,
+      width: width,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: _toggleControls,
+        onDoubleTap: NativeBridge.playPause,
+        onVerticalDragStart: (details) => _startAdjustGesture(isLeft, details),
+        onVerticalDragUpdate: _updateAdjustGesture,
+        onVerticalDragEnd: (_) => _finishAdjustGesture(),
+        onVerticalDragCancel: _finishAdjustGesture,
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+
+  void _startAdjustGesture(bool isBrightness, DragStartDetails details) {
+    _adjustIsBrightness = isBrightness;
+    _adjustStartDy = details.globalPosition.dy;
+    _adjustBaseValue = isBrightness ? _brightness : _volume;
+  }
+
+  void _updateAdjustGesture(DragUpdateDetails details) {
+    final startDy = _adjustStartDy;
+    final base = _adjustBaseValue;
+    if (startDy == null || base == null) return;
+    // 全屏滑动 ≈ 完整调整范围；上滑增大、下滑减小。
+    final span = MediaQuery.sizeOf(context).height.clamp(1.0, double.infinity);
+    final moved = (startDy - details.globalPosition.dy) / span;
+    var next = (base + moved).clamp(0.0, 1.0);
+    // 亮度 0 会直接黑屏看不到指示器，保底 2%。
+    if (_adjustIsBrightness) next = next.clamp(0.02, 1.0);
+    setState(() => _adjustIndicatorValue = next);
+    if (_adjustIsBrightness) {
+      _brightness = next;
+      NativeBridge.setScreenBrightness(next);
+    } else {
+      _volume = next;
+      NativeBridge.setMusicVolume(next);
+    }
+  }
+
+  void _finishAdjustGesture() {
+    if (_adjustIndicatorValue == null) return;
+    _adjustIndicatorTimer?.cancel();
+    _adjustIndicatorTimer = Timer(const Duration(milliseconds: 800), () {
+      if (!mounted) return;
+      setState(() => _adjustIndicatorValue = null);
+    });
+  }
+
   Duration get _seekWindow {
     final tenPercent = (_duration.inMilliseconds * 0.1).round();
     final clamped = tenPercent.clamp(30000, 120000);
@@ -1762,8 +2362,8 @@ class _PlayerPageState extends State<PlayerPage> {
     });
     await SystemChrome.setPreferredOrientations(
       next
-          ? [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]
-          : DeviceOrientation.values,
+          ? [DeviceOrientation.landscapeLeft]
+          : [DeviceOrientation.portraitUp],
     );
   }
 
@@ -1773,11 +2373,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _portrait = next;
       _landscape = false;
     });
-    await SystemChrome.setPreferredOrientations(
-      next
-          ? [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]
-          : DeviceOrientation.values,
-    );
+    await SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
   }
 
   Future<void> _showSpeedSheet() async {

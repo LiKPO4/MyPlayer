@@ -112,7 +112,20 @@ class EncryptedVideoDataSource(
         val fallback = video.xorUntilOffset.takeIf { it >= 0L } ?: video.size
         val resolved = runCatching {
             resolver.openInputStream(video.uri)?.use { stream ->
-                EncryptedVideoFormat.findEncryptedPrefixEnd(stream, video.size)
+                val boundary = EncryptedVideoFormat.findEncryptedPrefixEnd(stream, video.size)
+                // 与扫描路径一致：moov 等大 box 尾部跨过 1MB 边界时，首个明文 box
+                // 的起点不是 XOR 结束点（否则旧扫描缓存里的错误边界会再次黑屏）。
+                if (boundary > EncryptedVideoFormat.ENCRYPTED_PREFIX_LENGTH) {
+                    resolver.openInputStream(video.uri)?.use { verifyStream ->
+                        EncryptedVideoFormat.refineBoundaryForOversizedBox(
+                            verifyStream,
+                            video.size,
+                            boundary
+                        )
+                    } ?: boundary
+                } else {
+                    boundary
+                }
             }
         }.getOrNull()?.takeIf { it >= 0L } ?: fallback
 

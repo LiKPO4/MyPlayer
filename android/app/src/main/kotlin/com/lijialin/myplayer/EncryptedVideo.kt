@@ -8,7 +8,9 @@ data class EncryptedVideo(
     val fileName: String,
     val size: Long,
     val lastModified: Long,
-    val xorUntilOffset: Long
+    val xorUntilOffset: Long,
+    /** 文件末尾缺失的字节数：>0 表示被截断，0 表示完整，-1 表示尚未检测。 */
+    val incompleteBytes: Long = UNKNOWN_INCOMPLETE_BYTES
 ) {
     fun toMap(): Map<String, Any> = mapOf(
         "uri" to uri.toString(),
@@ -16,10 +18,13 @@ data class EncryptedVideo(
         "fileName" to fileName,
         "size" to size,
         "lastModified" to lastModified,
-        "xorUntilOffset" to xorUntilOffset
+        "xorUntilOffset" to xorUntilOffset,
+        "incompleteBytes" to incompleteBytes
     )
 
     companion object {
+        const val UNKNOWN_INCOMPLETE_BYTES = -1L
+
         fun fromMap(map: Map<*, *>): EncryptedVideo {
             return EncryptedVideo(
                 uri = Uri.parse(map["uri"] as String),
@@ -27,7 +32,9 @@ data class EncryptedVideo(
                 fileName = (map["fileName"] as? String) ?: map["displayName"] as String,
                 size = (map["size"] as Number).toLong(),
                 lastModified = (map["lastModified"] as Number).toLong(),
-                xorUntilOffset = (map["xorUntilOffset"] as Number).toLong()
+                xorUntilOffset = (map["xorUntilOffset"] as Number).toLong(),
+                incompleteBytes = (map["incompleteBytes"] as? Number)?.toLong()
+                    ?: UNKNOWN_INCOMPLETE_BYTES
             )
         }
     }

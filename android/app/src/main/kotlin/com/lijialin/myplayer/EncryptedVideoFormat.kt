@@ -10,7 +10,7 @@ object EncryptedVideoFormat {
     // v14: 1MB 经验规则快路径——加密工具固定 XOR 文件前 1MB（ffmpeg 实证：四个真实文件
     //      在 K=1MB 解密均 0 错误）；差分证据吻合时只扫约 1.25MB 即返回，证据不足再退回
     //      累积差分 argmin 全扫。修复 64 位扩展长度 mdat + 高噪数据导致的误判与全量扫描卡顿。
-    const val BOUNDARY_ANALYSIS_VERSION = 14
+    const val BOUNDARY_ANALYSIS_VERSION = 15
 
     // mdat 差分扫描的读取块大小。
     private const val MEDIA_SCAN_CHUNK_SIZE = 256 * 1024
@@ -28,6 +28,18 @@ object EncryptedVideoFormat {
     private val FTYP = byteArrayOf('f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte())
     private val MOOV = byteArrayOf('m'.code.toByte(), 'o'.code.toByte(), 'o'.code.toByte(), 'v'.code.toByte())
     private val TOP_LEVEL_BOXES = setOf("ftyp", "free", "mdat", "wide", "skip", "moov", "styp", "moof", "sidx")
+
+    // 完整性检测遍历的顶层 box 上限：分片 MP4 的 moof/mdat 对会很多，超过即放弃判定。
+    private const val MAX_COMPLETENESS_BOXES = 256
+
+    // 跨界边界修正的探针参数。
+    private const val BOUNDARY_PROBE_WINDOW = 256L * 1024L
+    private const val PLAIN_TABLE_ZERO_RATIO = 0.08
+    private val BOX_TYPE_PROBES = listOf(
+        "mvhd", "trak", "tkhd", "mdia", "mdhd", "hdlr", "minf", "stbl", "stsd", "stts",
+        "stss", "stsc", "stsz", "stco", "co64", "udta", "meta", "ilst", "mvex", "trex",
+        "smhd", "vmhd", "dinf"
+    )
 
     fun hasEncryptedMp4Header(header: ByteArray, bytesRead: Int = header.size): Boolean {
         if (bytesRead < 8) return false
@@ -139,6 +151,72 @@ object EncryptedVideoFormat {
 
     fun resolveXorUntilOffset(inputStream: InputStream, fileSize: Long, cachedOffset: Long): Long {
         return if (cachedOffset >= 0L) cachedOffset else findEncryptedMoovBoxStart(inputStream, fileSize)
+    }
+
+    /** 加密工具固定 XOR 文件前 1MB。当 findEncryptedPrefixEnd 返回的边界超过 1MB
+     *  （moov 等超大 box 的尾部跨过 1MB，首个全明文 box 在其后出现）时，检查
+     *  [1MB, 边界) 按明文读是否呈现 MP4 结构痕迹：命中已知 box 类型 ASCII，或
+     *  样本表特有的高 0x00 字节率（密文按明文读 0x00 率约为随机 0.4%）。命中则
+     *  真实边界是 1MB——这段是明文，按原边界播放会把明文再 XOR 一遍导致 moov
+     *  解析失败（打开黑屏，ffmpeg 实证 `missing mandatory atoms`）。 */
+    fun refineBoundaryForOversizedBox(inputStream: InputStream, fileSize: Long, candidate: Long): Long {
+        if (candidate <= ENCRYPTED_PREFIX_LENGTH || candidate > fileSize) return candidate
+        val probeLength = minOf(candidate, ENCRYPTED_PREFIX_LENGTH + BOUNDARY_PROBE_WINDOW) - ENCRYPTED_PREFIX_LENGTH
+        if (probeLength < 16L) return candidate
+        inputStream.skipFully(ENCRYPTED_PREFIX_LENGTH)
+        val probe = inputStream.readExact(probeLength.toInt())
+        if (probe.size < probeLength.toInt()) return candidate
+
+        val plainBoxTypeHit = BOX_TYPE_PROBES.any { probe.indexOf(it.toByteArray(Charsets.US_ASCII)) >= 0 }
+        if (plainBoxTypeHit) return ENCRYPTED_PREFIX_LENGTH
+
+        val zeroRatio = probe.count { it == 0.toByte() }.toDouble() / probe.size
+        return if (zeroRatio >= PLAIN_TABLE_ZERO_RATIO) ENCRYPTED_PREFIX_LENGTH else candidate
+    }
+
+    /** 顶层 box 遍历的完整性检测：依次走过顶层 box，若某个 box 的声明长度超出文件末尾，
+     *  返回缺失的字节数；结构完整、或无法解析出可信结构时返回 0（不判定）。
+     *  截断的文件（如 mdat 声明 15.9MB 而文件只有 1MB）moov 仍可解析、时长正常，
+     *  但采样表指向的媒体数据不存在，播放到断点即 EOF。 */
+    fun findMissingTailBytes(inputStream: InputStream, fileSize: Long): Long {
+        var offset = 0L
+        var guard = 0
+        while (offset + 8L <= fileSize && guard++ < MAX_COMPLETENESS_BOXES) {
+            val header = inputStream.readExact(8)
+            if (header.size < 8) return 0L
+
+            // 同一段字节只有一种读法能命中顶层 box 名（顶层类型异或 0x12 后都不再是顶层类型）。
+            val plainSize = header.readUInt32Plain(0)
+            val plainType = header.copyOfRange(4, 8).toAsciiString()
+            val usePlain = plainType in TOP_LEVEL_BOXES && plainSize >= 8L
+
+            val decodedSize = header.readUInt32Xor(offset = 0)
+            val decodedType = header.copyOfRange(4, 8).xorBytes().toAsciiString()
+            if (!usePlain && (decodedType !in TOP_LEVEL_BOXES || (decodedSize != 1L && decodedSize < 8L))) {
+                return 0L
+            }
+
+            val headerSize: Long
+            val boxSize: Long
+            if (usePlain) {
+                headerSize = 8L
+                boxSize = plainSize
+            } else if (decodedSize == 1L) {
+                val extendedSize = inputStream.readExact(8)
+                if (extendedSize.size < 8) return 0L
+                headerSize = 16L
+                boxSize = extendedSize.readUInt64Xor(offset = 0)
+            } else {
+                headerSize = 8L
+                boxSize = decodedSize
+            }
+            if (boxSize < headerSize) return 0L
+            if (offset + boxSize > fileSize) return offset + boxSize - fileSize
+
+            inputStream.skipFully(boxSize - headerSize)
+            offset += boxSize
+        }
+        return 0L
     }
 
     fun extractTitleFromMoov(inputStream: InputStream, moovStart: Long, fileSize: Long): String? {
